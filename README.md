@@ -79,8 +79,10 @@ bunx prisma db seed
 ## Documentacion
 
 - Estructura del repositorio: `docs/estructura-repo.md`
-- Registros de trabajo: `worklog.md`
-- Logs de servidor: `logsservidor.md`
+- Rutas de envio: `docs/shipping/api-reference.md`
+- Ejemplos de checkout para rutas: `docs/shipping/checkout-examples.md`
+- Upsert de carritos y ordenes: `docs/orders/cart-order-upsert.md`
+- Registros historicos de trabajo: `docs/history/worklog.md`
 
 ## Sistema de estilos y tema
 

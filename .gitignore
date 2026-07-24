@@ -49,6 +49,11 @@ prompt
 
 server.log
 trabajo-local/
+# Registros de compilacion y despliegue locales
+build_*.log
+build_*.txt
+decoded_build_error.log
+logsservidor.md
 # Skills directory
 /skills/
 opencode.jsonc
