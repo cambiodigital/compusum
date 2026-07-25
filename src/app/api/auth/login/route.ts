@@ -2,14 +2,42 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifyPassword, createSession, setSessionCookie } from '@/lib/auth';
 import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
+import {
+  getClientIp,
+  checkRateLimit,
+  recordFailedAttempt,
+  resetRateLimit,
+} from '@/lib/rate-limit';
 
 // POST /api/auth/login - Login admin user
 export async function POST(request: Request) {
   try {
+    const clientIp = getClientIp(request);
+    const ipKey = `admin-login:ip:${clientIp}`;
+
+    // Verificar rate limit por IP antes de consultar usuario o password
+    const ipCheck = await checkRateLimit(ipKey);
+    if (ipCheck.isBlocked) {
+      const retryAfter = ipCheck.retryAfterSeconds || 900;
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Demasiados intentos fallidos. Intenta de nuevo más tarde.',
+          retryAfter,
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(retryAfter),
+          },
+        }
+      );
+    }
+
     const body = await request.json();
     const { email, password } = body;
 
-    // Validate required fields
+    // Validar campos requeridos
     if (!email || !password) {
       return NextResponse.json(
         { success: false, error: 'Email y contraseña son requeridos' },
@@ -17,37 +45,77 @@ export async function POST(request: Request) {
       );
     }
 
-    // Find user by email
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const emailKey = `admin-login:email:${normalizedEmail}`;
+
+    // Verificar rate limit por email
+    const emailCheck = await checkRateLimit(emailKey);
+    if (emailCheck.isBlocked) {
+      const retryAfter = emailCheck.retryAfterSeconds || 900;
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Demasiados intentos fallidos. Intenta de nuevo más tarde.',
+          retryAfter,
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(retryAfter),
+          },
+        }
+      );
+    }
+
+    // Buscar usuario por email
     const user = await db.user.findUnique({
-      where: { email: email.toLowerCase() },
+      where: { email: normalizedEmail },
     });
 
     if (!user) {
+      await Promise.all([
+        recordFailedAttempt(ipKey),
+        recordFailedAttempt(emailKey),
+      ]);
       return NextResponse.json(
         { success: false, error: 'Credenciales inválidas' },
         { status: 401 }
       );
     }
 
-    // Check if user is active
+    // Verificar si el usuario está activo
     if (!user.isActive) {
+      await Promise.all([
+        recordFailedAttempt(ipKey),
+        recordFailedAttempt(emailKey),
+      ]);
       return NextResponse.json(
         { success: false, error: 'Usuario desactivado' },
         { status: 401 }
       );
     }
 
-    // Verify password
+    // Verificar contraseña
     const isValidPassword = await verifyPassword(password, user.password);
 
     if (!isValidPassword) {
+      await Promise.all([
+        recordFailedAttempt(ipKey),
+        recordFailedAttempt(emailKey),
+      ]);
       return NextResponse.json(
         { success: false, error: 'Credenciales inválidas' },
         { status: 401 }
       );
     }
 
-    // Create session
+    // Reseteo de contadores tras autenticación exitosa
+    await Promise.all([
+      resetRateLimit(ipKey),
+      resetRateLimit(emailKey),
+    ]);
+
+    // Crear sesión
     const token = await createSession(user.id);
     await setSessionCookie(token);
 
@@ -60,7 +128,7 @@ export async function POST(request: Request) {
       ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
     }
 
-    // Update last login
+    // Actualizar último login
     await db.user.update({
       where: { id: user.id },
       data: { lastLogin: new Date() },
@@ -77,7 +145,7 @@ export async function POST(request: Request) {
       message: 'Inicio de sesión exitoso',
     });
   } catch (error) {
-    console.error('Error during login:', error);
+    console.error('Error durante el login:', error);
 
     if (error instanceof Error) {
       const message = error.message.toLowerCase();

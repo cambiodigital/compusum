@@ -447,4 +447,21 @@ model Setting {
   updatedAt DateTime @updatedAt
 }
 
+// =====================
+// RATE LIMITING PERSISTENTE
+// =====================
+model RateLimit {
+  id           String    @id @default(cuid())
+  key          String    @unique
+  attempts     Int       @default(0)
+  firstAttempt DateTime  @default(now())
+  blockedUntil DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([key])
+  @@index([blockedUntil])
+}
+
+
 
