@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { Prisma } from "@prisma/client";
 import { upsertCart, upsertActiveCart } from "@/lib/order-cart-upsert";
 import { getCurrentUser } from "@/lib/auth";
 
@@ -175,7 +176,9 @@ export async function GET(request: NextRequest) {
     const cartUuid = request.nextUrl.searchParams.get("uuid");
     const cartId = request.nextUrl.searchParams.get("id");
 
-    let cart = null;
+    let cart: Prisma.CartGetPayload<{
+      include: { items: { include: { product: true } } };
+    }> | null = null;
 
     // Obtener por UUID (puede ser un carrito compartido)
     if (cartUuid) {
@@ -219,6 +222,21 @@ export async function GET(request: NextRequest) {
         { success: true, data: null },
         { status: 200 }
       );
+    }
+
+    // Validar propiedad si se solicitó un carrito específico por id o uuid
+    if (cartUuid || cartId) {
+      const userRole = currentUser?.role ?? null;
+      const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
+      const isOwner = (cart.sessionId && cart.sessionId === sessionId) || (userId && cart.userId === userId);
+      const isShared = cart.status === "compartido";
+
+      if (!isAdminOrAgent && !isShared && !isOwner) {
+        return NextResponse.json(
+          { success: false, error: "No tienes permiso para acceder a este carrito" },
+          { status: 403 }
+        );
+      }
     }
 
     return NextResponse.json({

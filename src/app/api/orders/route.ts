@@ -72,6 +72,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Carrito no encontrado" }, { status: 404 });
     }
 
+    // Validar propiedad del carrito y que esté activo
+    const userRole = currentUser?.role ?? null;
+    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
+    const isOwner = (cart.sessionId && cart.sessionId === sessionId) || (userId && cart.userId === userId);
+
+    if (!isAdminOrAgent && !isOwner) {
+      return NextResponse.json(
+        { success: false, error: "No tienes permiso para realizar un pedido con este carrito" },
+        { status: 403 }
+      );
+    }
+
+    if (cart.status !== "activo") {
+      return NextResponse.json(
+        { success: false, error: "Este carrito no está activo o ya ha sido convertido" },
+        { status: 400 }
+      );
+    }
+
     // Calculate subtotal from cart items
     const subtotal = cart.items.reduce((sum, item) => {
       const price =

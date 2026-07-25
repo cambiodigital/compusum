@@ -1,7 +1,9 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { processCheckout } from '@/lib/checkout';
+import { db } from '@/lib/db';
+import { getCurrentUser } from '@/lib/auth';
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const checkoutData = await req.json();
 
@@ -11,6 +13,31 @@ export async function POST(req: Request) {
 
     if (!checkoutData.cityId || !checkoutData.cartId) {
       return NextResponse.json({ error: 'cityId and cartId are required' }, { status: 400 });
+    }
+
+    // Validar propiedad del carrito y estado activo
+    const sessionId = req.headers.get("x-session-id");
+    const currentUser = await getCurrentUser();
+    const userId = currentUser?.id ?? null;
+    const userRole = currentUser?.role ?? null;
+    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
+
+    const cart = await db.cart.findUnique({
+      where: { id: checkoutData.cartId }
+    });
+
+    if (!cart) {
+      return NextResponse.json({ error: 'Cart not found' }, { status: 404 });
+    }
+
+    const isOwner = (cart.sessionId && cart.sessionId === sessionId) || (userId && cart.userId === userId);
+
+    if (!isAdminOrAgent && !isOwner) {
+      return NextResponse.json({ error: 'Unauthorized to checkout this cart' }, { status: 403 });
+    }
+
+    if (cart.status !== "activo") {
+      return NextResponse.json({ error: 'Cart is not active' }, { status: 400 });
     }
 
     const result = await processCheckout(checkoutData);

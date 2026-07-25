@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { getCurrentUser } from "@/lib/auth";
 
 interface RouteParams {
   params: Promise<{ uuid: string }>;
@@ -38,6 +39,23 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    // Validar propiedad del carrito
+    const sessionId = request.headers.get("x-session-id");
+    const currentUser = await getCurrentUser();
+    const userId = currentUser?.id ?? null;
+    const userRole = currentUser?.role ?? null;
+    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
+
+    const isOwner = (cart.sessionId && cart.sessionId === sessionId) || (userId && cart.userId === userId);
+    const isShared = cart.status === "compartido";
+
+    if (!isAdminOrAgent && !isShared && !isOwner) {
+      return NextResponse.json(
+        { success: false, error: "No tienes permiso para acceder a este carrito" },
+        { status: 403 }
+      );
+    }
+
     return NextResponse.json({ success: true, data: cart });
   } catch (error) {
     console.error("Error fetching cart:", error);
@@ -59,6 +77,22 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json(
         { success: false, error: "Carrito no encontrado" },
         { status: 404 }
+      );
+    }
+
+    // Validar propiedad del carrito
+    const sessionId = request.headers.get("x-session-id");
+    const currentUser = await getCurrentUser();
+    const userId = currentUser?.id ?? null;
+    const userRole = currentUser?.role ?? null;
+    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
+
+    const isOwner = (existingCart.sessionId && existingCart.sessionId === sessionId) || (userId && existingCart.userId === userId);
+
+    if (!isAdminOrAgent && !isOwner) {
+      return NextResponse.json(
+        { success: false, error: "No tienes permiso para modificar este carrito" },
+        { status: 403 }
       );
     }
 
