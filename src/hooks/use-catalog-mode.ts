@@ -49,3 +49,27 @@ export function useProductCatalogMode(
 
   return { catalogMode, loading };
 }
+
+/**
+ * Checks whether a specific product/item is in catalog mode given its properties and global mode.
+ */
+export function isItemInCatalogMode(
+  product?: {
+    catalogMode?: boolean;
+    categoryCatalogMode?: boolean;
+    brandCatalogMode?: boolean;
+    category?: { catalogMode?: boolean } | null;
+    brand?: { catalogMode?: boolean } | null;
+  } | null,
+  globalCatalogMode: boolean = false
+): boolean {
+  if (globalCatalogMode) return true;
+  if (!product) return false;
+  return Boolean(
+    product.catalogMode ||
+    product.categoryCatalogMode ||
+    product.brandCatalogMode ||
+    product.category?.catalogMode ||
+    product.brand?.catalogMode
+  );
+}

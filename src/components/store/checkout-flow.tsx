@@ -33,6 +33,7 @@ import { CartItemRow } from "@/components/store/cart-item-row";
 import { CitySelector } from "@/components/store/city-selector";
 import { ShareCartMenu } from "@/components/store/share-cart-menu";
 import { formatPrice } from "@/lib/format";
+import { isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { toast } from "sonner";
 import Link from "next/link";
 
@@ -61,6 +62,8 @@ export function CheckoutFlow() {
   const setSavedCartUuid = useCartStore((s) => s.setSavedCartUuid);
   const subtotal = useCartStore(getSubtotal);
   const itemCount = useCartStore(getItemCount);
+
+  const hasCatalogItems = catalogMode || items.some((item) => isItemInCatalogMode(item.product, catalogMode));
 
   // Fetch settings (WhatsApp phone + catalog mode)
   useEffect(() => {
@@ -140,7 +143,7 @@ export function CheckoutFlow() {
   };
 
   const generateWhatsAppMessage = () => {
-    const isCatalogQuote = catalogMode;
+    const isCatalogQuote = hasCatalogItems;
     let msg = isCatalogQuote ? "*Cotización CompuSum* 📋\n\n" : "*Pedido CompuSum* 🛒\n\n";
     if (customerInfo.name) msg += `*Cliente:* ${customerInfo.name}\n`;
     if (customerInfo.company) msg += `*Empresa:* ${customerInfo.company}\n`;
@@ -154,8 +157,9 @@ export function CheckoutFlow() {
       const variant = item.product.variantName
         ? ` [Variacion: ${item.product.variantName}]`
         : "";
+      const itemCatalogMode = isItemInCatalogMode(item.product, catalogMode);
       msg += `${i + 1}. ${item.product.name}${ref}${variant} x${item.quantity}`;
-      if (!isCatalogQuote && price) msg += ` - ${formatPrice(price)} c/u`;
+      if (!itemCatalogMode && price) msg += ` - ${formatPrice(price)} c/u`;
       msg += "\n";
     });
 
@@ -269,9 +273,9 @@ export function CheckoutFlow() {
           {currentStep === 0 && (
             <div>
               <h2 className="text-lg font-semibold text-slate-900 mb-4">
-                {catalogMode ? "Lista de cotización" : "Resumen del pedido"} ({itemCount} productos)
+                {hasCatalogItems ? "Lista de cotización" : "Resumen del pedido"} ({itemCount} productos)
               </h2>
-              {catalogMode && (
+              {hasCatalogItems && (
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
                   <p className="text-sm text-amber-800">
                     📋 Los precios serán cotizados personalmente.
@@ -284,12 +288,12 @@ export function CheckoutFlow() {
                   <CartItemRow
                     key={getCartItemKey(item.product.id, item.product.variantId)}
                     item={item}
-                    hidePrices={catalogMode}
+                    hidePrices={isItemInCatalogMode(item.product, catalogMode)}
                   />
                 ))}
               </div>
               <Separator className="my-4" />
-              {catalogMode ? (
+              {hasCatalogItems ? (
                 <p className="text-sm text-slate-500">
                   Precios por cotización.
                 </p>
@@ -382,7 +386,7 @@ export function CheckoutFlow() {
           {currentStep === 3 && (
             <div>
               <h2 className="text-lg font-semibold text-slate-900 mb-1">
-                {catalogMode ? "Confirmar solicitud de cotización" : "Confirmar pedido"}
+                {hasCatalogItems ? "Confirmar solicitud de cotización" : "Confirmar pedido"}
               </h2>
               <p className="text-sm text-slate-500 mb-5">
                 Revisá el resumen y elegí cómo querés proceder
@@ -409,7 +413,7 @@ export function CheckoutFlow() {
                     <span className="font-medium">{customerInfo.company}</span>
                   </div>
                 )}
-                {!catalogMode && subtotal > 0 && (
+                {!hasCatalogItems && subtotal > 0 && (
                   <>
                     <Separator />
                     <div className="flex justify-between">
@@ -419,7 +423,7 @@ export function CheckoutFlow() {
                     <p className="text-xs text-slate-400">Precios mayoristas sujetos a confirmación</p>
                   </>
                 )}
-                {catalogMode && (
+                {hasCatalogItems && (
                   <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-1">
                     📋 Los precios serán cotizados de forma personalizada
                   </p>
@@ -431,11 +435,11 @@ export function CheckoutFlow() {
                 <div className="bg-green-50 border border-green-200 rounded-xl p-5 text-center">
                   <CheckCircle2 className="h-10 w-10 text-green-600 mx-auto mb-3" />
                   <p className="text-lg font-bold text-green-800">
-                    {catalogMode ? "¡Solicitud enviada!" : "¡Pedido registrado!"}
+                    {hasCatalogItems ? "¡Solicitud enviada!" : "¡Pedido registrado!"}
                   </p>
                   <p className="text-sm font-mono text-green-700 mt-1">{orderNumber}</p>
                   <p className="text-xs text-green-600 mt-2">
-                    {catalogMode
+                    {hasCatalogItems
                       ? "Recibimos tu solicitud. Te enviaremos la cotización pronto."
                       : "Tu pedido está registrado. Pronto nos comunicamos para confirmar los detalles."}
                   </p>
@@ -506,14 +510,14 @@ export function CheckoutFlow() {
                       </div>
                     </div>
                     <DialogTitle className="text-center text-green-800">
-                      {catalogMode ? "¡Solicitud registrada!" : "¡Pedido registrado!"}
+                      {hasCatalogItems ? "¡Solicitud registrada!" : "¡Pedido registrado!"}
                     </DialogTitle>
                     <DialogDescription className="text-center">
                       <span className="block font-mono text-base font-semibold text-slate-800 mt-1 break-all">
                         {orderNumber}
                       </span>
                       <span className="block text-sm mt-3 text-slate-600">
-                        {catalogMode
+                        {hasCatalogItems
                           ? "Recibimos tu solicitud de cotización. Pronto nos vamos a comunicar con vos para enviarte los precios."
                           : "Tu pedido quedó registrado. Pronto nos vamos a comunicar con vos para confirmar los detalles y coordinar la entrega."}
                       </span>

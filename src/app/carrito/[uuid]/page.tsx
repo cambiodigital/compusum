@@ -38,8 +38,8 @@ export default async function SharedCartPage({ params }: PageProps) {
         include: {
           product: {
             include: {
-              brand: { select: { name: true, slug: true } },
-              category: { select: { name: true, slug: true } },
+              brand: { select: { name: true, slug: true, catalogMode: true } },
+              category: { select: { name: true, slug: true, catalogMode: true } },
             },
           },
         },
@@ -97,6 +97,7 @@ export default async function SharedCartPage({ params }: PageProps) {
         wholesalePrice: item.product.wholesalePrice,
         minWholesaleQty: item.product.minWholesaleQty,
         stockStatus: item.product.stockStatus,
+        catalogMode: item.product.catalogMode,
         brand: item.product.brand,
         category: item.product.category,
       },

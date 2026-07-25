@@ -13,8 +13,9 @@ export interface CartProduct {
   wholesalePrice: number | null;
   minWholesaleQty: number;
   stockStatus: string;
-  brand?: { name: string; slug: string } | null;
-  category?: { name: string; slug: string } | null;
+  catalogMode?: boolean;
+  brand?: { name: string; slug: string; catalogMode?: boolean } | null;
+  category?: { name: string; slug: string; catalogMode?: boolean } | null;
 }
 
 export interface CartItem {

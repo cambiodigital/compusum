@@ -20,7 +20,7 @@ import { CartEmptyTopCategories } from "@/components/store/cart-empty-top-catego
 import { ShareCartMenu } from "@/components/store/share-cart-menu";
 import { formatPrice } from "@/lib/format";
 import Link from "next/link";
-import { useCatalogMode } from "@/hooks/use-catalog-mode";
+import { useCatalogMode, isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { getCartItemKey } from "@/stores/cart-store";
 
 export function CartSheet() {
@@ -31,6 +31,8 @@ export function CartSheet() {
   const itemCount = useCartStore(getItemCount);
   const subtotal = useCartStore(getSubtotal);
   const { catalogMode } = useCatalogMode();
+
+  const hasCatalogItems = catalogMode || items.some((item) => isItemInCatalogMode(item.product, catalogMode));
 
   // Prevent hydration mismatch for Zustand persist
   const [mounted, setMounted] = useState(false);
@@ -106,7 +108,7 @@ export function CartSheet() {
                   <CartItemRow
                     key={getCartItemKey(item.product.id, item.product.variantId)}
                     item={item}
-                    hidePrices={catalogMode}
+                    hidePrices={isItemInCatalogMode(item.product, catalogMode)}
                   />
                 ))}
               </div>
@@ -120,13 +122,13 @@ export function CartSheet() {
               {/* Subtotal */}
               <div className="flex items-center justify-between">
                 <span className="text-sm text-slate-600">Subtotal</span>
-                {catalogMode ? (
+                {hasCatalogItems ? (
                   <span className="text-sm font-medium text-slate-500">Cotización personalizada</span>
                 ) : (
                   <span className="text-lg font-bold text-slate-900">{formatPrice(subtotal)}</span>
                 )}
               </div>
-              {catalogMode ? (
+              {hasCatalogItems ? (
                 <p className="text-[11px] text-slate-400">Precios por cotización.</p>
               ) : (
                 <p className="text-[11px] text-slate-400">Precios sujetos a confirmación. Envío no incluido.</p>
@@ -175,9 +177,11 @@ export function CartSheet() {
 function CartWhatsAppButton() {
   const items = useCartStore((s) => s.items);
   const customerInfo = useCartStore((s) => s.customerInfo);
+  const { catalogMode } = useCatalogMode();
 
   const generateMessage = () => {
-    let msg = "*Cotización CompuSum* 🛒\n\n";
+    const hasCatalogItems = catalogMode || items.some((item) => isItemInCatalogMode(item.product, catalogMode));
+    let msg = hasCatalogItems ? "*Cotización CompuSum* 📋\n\n" : "*Pedido CompuSum* 🛒\n\n";
     if (customerInfo.name) msg += `*Cliente:* ${customerInfo.name}\n`;
     if (customerInfo.company) msg += `*Empresa:* ${customerInfo.company}\n\n`;
 
@@ -189,15 +193,16 @@ function CartWhatsAppButton() {
       const variant = item.product.variantName
         ? ` [Variacion: ${item.product.variantName}]`
         : "";
+      const itemCatalogMode = isItemInCatalogMode(item.product, catalogMode);
       msg += `${i + 1}. ${item.product.name}${ref}${variant} x${item.quantity}`;
-      if (price) {
+      if (!itemCatalogMode && price) {
         msg += ` - ${formatPrice(price)} c/u`;
         subtotal += price * item.quantity;
       }
       msg += "\n";
     });
 
-    if (subtotal > 0) msg += `\n*Subtotal:* ${formatPrice(subtotal)}`;
+    if (!hasCatalogItems && subtotal > 0) msg += `\n*Subtotal:* ${formatPrice(subtotal)}`;
     return msg;
   };
 

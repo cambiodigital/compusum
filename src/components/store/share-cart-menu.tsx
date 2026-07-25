@@ -10,25 +10,29 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useCartStore, getSubtotal } from "@/stores/cart-store";
 import { formatPrice } from "@/lib/format";
+import { useCatalogMode, isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { toast } from "sonner";
 
 export function ShareCartMenu() {
   const items = useCartStore((s) => s.items);
   const savedCartUuid = useCartStore((s) => s.savedCartUuid);
   const subtotal = useCartStore(getSubtotal);
+  const { catalogMode } = useCatalogMode();
 
   const getCartText = () => {
-    let text = "Mi carrito CompuSum:\n\n";
+    const hasCatalogItems = catalogMode || items.some((item) => isItemInCatalogMode(item.product, catalogMode));
+    let text = hasCatalogItems ? "Cotización CompuSum:\n\n" : "Mi carrito CompuSum:\n\n";
     items.forEach((item, i) => {
       const price = item.product.wholesalePrice || item.product.price;
       const variant = item.product.variantName
         ? ` [Variacion: ${item.product.variantName}]`
         : "";
+      const itemCatalogMode = isItemInCatalogMode(item.product, catalogMode);
       text += `${i + 1}. ${item.product.name}${variant} x${item.quantity}`;
-      if (price) text += ` - ${formatPrice(price * item.quantity)}`;
+      if (!itemCatalogMode && price) text += ` - ${formatPrice(price * item.quantity)}`;
       text += "\n";
     });
-    if (subtotal > 0) text += `\nSubtotal: ${formatPrice(subtotal)}`;
+    if (!hasCatalogItems && subtotal > 0) text += `\nSubtotal: ${formatPrice(subtotal)}`;
     if (savedCartUuid) {
       text += `\n\nVer carrito: ${window.location.origin}/carrito/${savedCartUuid}`;
     }

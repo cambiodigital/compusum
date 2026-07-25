@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SafeProductImage } from "@/components/store/safe-product-image";
-import { useCatalogMode } from "@/hooks/use-catalog-mode";
+import { useCatalogMode, isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { useCartStore, type CartProduct } from "@/stores/cart-store";
 import { formatPrice } from "@/lib/format";
 import { resolveProductImageSrc, resolveProductName, resolveProductSlug } from "@/lib/product-fallbacks";
@@ -20,8 +20,9 @@ interface FeaturedProduct {
   wholesalePrice: number | null;
   minWholesaleQty: number;
   stockStatus: string;
-  brand?: { name: string; slug: string } | null;
-  category?: { name: string; slug: string } | null;
+  catalogMode?: boolean;
+  brand?: { name: string; slug: string; catalogMode?: boolean } | null;
+  category?: { name: string; slug: string; catalogMode?: boolean } | null;
 }
 
 export function CartFeaturedProducts() {
@@ -103,7 +104,7 @@ export function CartFeaturedProducts() {
                 >
                   {productName}
                 </Link>
-                {catalogMode ? (
+                {isItemInCatalogMode(product, catalogMode) ? (
                   <p className="text-xs text-slate-400 italic mt-0.5">Consultar precio</p>
                 ) : (
                   <p className="text-xs font-semibold text-blue-600 mt-0.5">

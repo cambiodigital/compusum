@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SafeProductImage } from "@/components/store/safe-product-image";
-import { useCatalogMode } from "@/hooks/use-catalog-mode";
+import { useCatalogMode, isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { useCartStore, type CartProduct } from "@/stores/cart-store";
 import { formatPrice } from "@/lib/format";
 import { resolveProductImageSrc, resolveProductName, resolveProductSlug } from "@/lib/product-fallbacks";
@@ -106,7 +106,7 @@ export function CrossSellSection() {
               >
                 {productName}
               </Link>
-              {catalogMode ? (
+              {isItemInCatalogMode(product, catalogMode) ? (
                 <p className="text-xs font-medium text-slate-500 italic">Consultar precio</p>
               ) : (
                 <p className="text-xs font-medium text-blue-600">
