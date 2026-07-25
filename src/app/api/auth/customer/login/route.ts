@@ -4,7 +4,9 @@ import {
   setSessionCookie,
   SESSION_DURATION_DAYS_REMEMBER_ME,
   SESSION_DURATION_HOURS_DEFAULT,
+  rotateGuestSessionCookie,
 } from '@/lib/auth';
+import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
 
 type LoginMethod = 'phone' | 'password';
 
@@ -73,6 +75,8 @@ export async function POST(req: Request) {
       );
     }
 
+    const sessionId = req.headers.get('x-session-id');
+
     if (method === 'phone') {
       const { phone, otpCode } = body;
       if (!phone || !otpCode) {
@@ -84,6 +88,14 @@ export async function POST(req: Request) {
 
       const result = await loginWithPhone(phone, otpCode, sessionHours);
       await setSessionCookie(result.token, sessionHours * 60 * 60);
+
+      if (sessionId && result.user?.id) {
+        await Promise.all([
+          transferSessionCartToUser(sessionId, result.user.id),
+          transferSessionOrderToUser(sessionId, result.user.id),
+        ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
+      }
+      await rotateGuestSessionCookie();
 
       return NextResponse.json({
         success: true,
@@ -101,6 +113,14 @@ export async function POST(req: Request) {
 
     const result = await loginWithPassword(phoneOrEmail, password, sessionHours);
     await setSessionCookie(result.token, sessionHours * 60 * 60);
+
+    if (sessionId && result.user?.id) {
+      await Promise.all([
+        transferSessionCartToUser(sessionId, result.user.id),
+        transferSessionOrderToUser(sessionId, result.user.id),
+      ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
+    }
+    await rotateGuestSessionCookie();
 
     return NextResponse.json({
       success: true,

@@ -127,6 +127,7 @@ export async function POST(request: Request) {
         transferSessionOrderToUser(sessionId, user.id),
       ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
     }
+    await rotateGuestSessionCookie();
 
     // Actualizar último login
     await db.user.update({

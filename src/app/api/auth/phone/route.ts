@@ -4,6 +4,7 @@ import {
   setSessionCookie,
   SESSION_DURATION_DAYS_REMEMBER_ME,
   SESSION_DURATION_HOURS_DEFAULT,
+  rotateGuestSessionCookie,
 } from '@/lib/auth';
 import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
 
@@ -37,6 +38,7 @@ export async function POST(req: Request) {
         transferSessionOrderToUser(sessionId, result.user.id),
       ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
     }
+    await rotateGuestSessionCookie();
 
     return NextResponse.json({
       success: true,

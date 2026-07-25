@@ -102,4 +102,18 @@ export async function clearSessionCookie(): Promise<void> {
   cookieStore.delete(SESSION_COOKIE_NAME);
 }
 
+export async function rotateGuestSessionCookie(): Promise<string> {
+  const newSessionId = crypto.randomUUID();
+  const cookieStore = await cookies();
+  cookieStore.set('x-session-id', newSessionId, {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60,
+    path: '/',
+  });
+  return newSessionId;
+}
+
 export const SESSION_COOKIE_NAME_EXPORT = SESSION_COOKIE_NAME;
+

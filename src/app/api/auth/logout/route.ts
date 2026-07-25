@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { deleteSession, clearSessionCookie, SESSION_COOKIE_NAME_EXPORT } from '@/lib/auth';
+import { deleteSession, clearSessionCookie, SESSION_COOKIE_NAME_EXPORT, rotateGuestSessionCookie } from '@/lib/auth';
 import { cookies } from 'next/headers';
 
 // POST /api/auth/logout - Logout
@@ -16,6 +16,9 @@ export async function POST() {
 
     // Clear session cookie
     await clearSessionCookie();
+
+    // Rotar la sesión anónima (guest session) para invalidar el historial anterior en el navegador
+    await rotateGuestSessionCookie();
 
     return NextResponse.json({
       success: true,

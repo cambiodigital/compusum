@@ -14,16 +14,20 @@ export async function GET(request: NextRequest) {
     const currentUser = await getCurrentUser();
     const userId = currentUser?.id ?? null;
 
-    if (!sessionId && !userId) {
+    // Si el usuario está autenticado, consultar estrictamente por su customerId.
+    // Si no está autenticado (invitado), consultar estrictamente por sessionId.
+    const whereClause = userId
+      ? { customerId: userId }
+      : sessionId
+      ? { sessionId }
+      : null;
+
+    if (!whereClause) {
       return NextResponse.json({ success: true, data: [] });
     }
 
-    const orConditions: Array<{ sessionId?: string; customerId?: string }> = [];
-    if (userId) orConditions.push({ customerId: userId });
-    if (sessionId) orConditions.push({ sessionId });
-
     const orders = await db.order.findMany({
-      where: { OR: orConditions },
+      where: whereClause,
       include: {
         items: {
           select: {

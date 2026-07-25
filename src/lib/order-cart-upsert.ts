@@ -400,17 +400,16 @@ export async function transferSessionOrderToUser(
 ) {
   if (!sessionId) return null;
 
-  // Encontrar órdenes activas con sessionId
+  // Encontrar órdenes con sessionId
   const sessionOrders = await db.order.findMany({
     where: {
       sessionId,
-      status: 'solicitado',
     },
   });
 
   if (sessionOrders.length === 0) return null;
 
-  // Transferir la primera (y debería ser la única) orden activa al usuario
+  // Transferir todas las órdenes del guest sessionId al usuario
   const orders = [];
   for (const order of sessionOrders) {
     const updated = await db.order.update({
@@ -427,3 +426,4 @@ export async function transferSessionOrderToUser(
 
   return orders.length === 1 ? orders[0] : orders;
 }
+
