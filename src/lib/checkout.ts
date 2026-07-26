@@ -1,6 +1,7 @@
 import { db } from './db';
 import { hashPassword } from './auth';
 import { Prisma } from '@prisma/client';
+import { validateAndPriceItems } from './cart-validation';
 
 function generateTemporaryPassword(): string {
   const bytes = new Uint8Array(16);
@@ -136,6 +137,7 @@ export async function processCheckout(checkoutData: any) {
   const { phone, email, name, items, cityId, cartId } = checkoutData;
 
   return db.$transaction(async (tx: any) => {
+    const { validatedItems, subtotal } = await validateAndPriceItems(items, tx);
     const customerResult = await upsertCheckoutCustomer({ name, phone, email }, tx);
     const availableRoute = await findBestRouteForCity(cityId, new Date(), tx);
 
@@ -150,13 +152,16 @@ export async function processCheckout(checkoutData: any) {
         agentId: customerResult.assignedAgentId,
         cityId,
         routeId: availableRoute?.id,
-        subtotal: calculateTotal(items),
+        subtotal,
         items: {
-          create: items.map((item: any) => ({
+          create: validatedItems.map((item) => ({
             productId: item.productId,
-            productName: item.productName || 'Product',
+            productName: item.productName,
+            variantId: item.variantId,
+            variantName: item.variantName,
+            variantCode: item.variantCode,
             quantity: item.quantity,
-            unitPrice: item.price,
+            unitPrice: item.unitPrice,
           })),
         },
       },
@@ -164,10 +169,6 @@ export async function processCheckout(checkoutData: any) {
 
     return { order, route: availableRoute };
   });
-}
-
-function calculateTotal(items: any[]) {
-    return items.reduce((acc, item) => acc + (item.price * item.quantity), 0);
 }
 
 /**

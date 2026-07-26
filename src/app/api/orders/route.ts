@@ -5,6 +5,7 @@ import { sendToWebhook, buildWebhookPayload } from "@/lib/webhook";
 import { findBestRouteForCity, normalizeEmail, normalizePhone, upsertCheckoutCustomer } from "@/lib/checkout";
 import { upsertOrder, findActiveOrder } from "@/lib/order-cart-upsert";
 import { getCurrentUser } from "@/lib/auth";
+import { validateAndPriceItems, CartValidationError } from "@/lib/cart-validation";
 
 export async function POST(request: NextRequest) {
   try {
@@ -59,12 +60,7 @@ export async function POST(request: NextRequest) {
     const cart = await db.cart.findUnique({
       where: { id: cartId },
       include: {
-        items: {
-          include: {
-            product: { select: { name: true, sku: true, wholesalePrice: true, price: true } },
-            variant: { select: { price: true, wholesalePrice: true } },
-          },
-        },
+        items: true,
       },
     });
 
@@ -91,17 +87,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Calculate subtotal from cart items
-    const subtotal = cart.items.reduce((sum, item) => {
-      const price =
-        item.unitPrice ||
-        item.variant?.wholesalePrice ||
-        item.variant?.price ||
-        item.product.wholesalePrice ||
-        item.product.price ||
-        0;
-      return sum + price * item.quantity;
-    }, 0);
+    if (!cart.items || cart.items.length === 0) {
+      return NextResponse.json(
+        { success: false, error: "El carrito está vacío" },
+        { status: 400 }
+      );
+    }
+
+    // Validar items en base de datos y recalculado exclusivo de subtotal en servidor
+    let validatedResult;
+    try {
+      validatedResult = await validateAndPriceItems(
+        cart.items.map((item) => ({
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+        }))
+      );
+    } catch (err) {
+      if (err instanceof CartValidationError) {
+        return NextResponse.json(
+          { success: false, error: err.message },
+          { status: 400 }
+        );
+      }
+      throw err;
+    }
+
+    const { validatedItems, subtotal } = validatedResult;
 
     // Verificar si ya existe una orden activa para esta sesión/usuario
     const existingOrder = await findActiveOrder(sessionId, userId);
@@ -133,20 +146,15 @@ export async function POST(request: NextRequest) {
             agentId: customerResult.assignedAgentId || null,
             subtotal,
             sentVia: sentVia || null,
-            items: cart.items.map((item) => ({
+            items: validatedItems.map((item) => ({
               productId: item.productId,
-              productName: item.product.name,
-              productSku: item.product.sku,
+              productName: item.productName,
+              productSku: item.productSku,
               variantId: item.variantId,
               variantName: item.variantName,
               variantCode: item.variantCode,
               quantity: item.quantity,
-              unitPrice:
-                item.unitPrice ||
-                item.variant?.wholesalePrice ||
-                item.variant?.price ||
-                item.product.wholesalePrice ||
-                item.product.price,
+              unitPrice: item.unitPrice,
             })),
           },
           cartId,
@@ -234,20 +242,15 @@ export async function POST(request: NextRequest) {
           agentId: customerResult.assignedAgentId || null,
           subtotal,
           sentVia: sentVia || null,
-          items: cart.items.map((item) => ({
+          items: validatedItems.map((item) => ({
             productId: item.productId,
-            productName: item.product.name,
-            productSku: item.product.sku,
+            productName: item.productName,
+            productSku: item.productSku,
             variantId: item.variantId,
             variantName: item.variantName,
             variantCode: item.variantCode,
             quantity: item.quantity,
-            unitPrice:
-              item.unitPrice ||
-              item.variant?.wholesalePrice ||
-              item.variant?.price ||
-              item.product.wholesalePrice ||
-              item.product.price,
+            unitPrice: item.unitPrice,
           })),
         },
         cartId,

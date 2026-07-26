@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { processCheckout } from '@/lib/checkout';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/auth';
+import { CartValidationError } from '@/lib/cart-validation';
 
 export async function POST(req: NextRequest) {
   try {
@@ -49,6 +50,9 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     console.error("Checkout error:", error);
+    if (error instanceof CartValidationError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: error.message || 'An error occurred during checkout' }, { status: 500 });
   }
 }

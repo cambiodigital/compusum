@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { upsertCart, upsertActiveCart } from "@/lib/order-cart-upsert";
 import { getCurrentUser } from "@/lib/auth";
+import { validateAndPriceItems, CartValidationError } from "@/lib/cart-validation";
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,18 +26,20 @@ export async function POST(request: NextRequest) {
     const currentUser = await getCurrentUser();
     const userId = currentUser?.id ?? null;
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return NextResponse.json(
-        { success: false, error: "El carrito debe tener al menos un producto" },
-        { status: 400 }
-      );
+    let validatedResult;
+    try {
+      validatedResult = await validateAndPriceItems(items);
+    } catch (err) {
+      if (err instanceof CartValidationError) {
+        return NextResponse.json(
+          { success: false, error: err.message },
+          { status: 400 }
+        );
+      }
+      throw err;
     }
 
-    // Calcular subtotal
-    let subtotal = 0;
-    for (const item of items) {
-      if (item.unitPrice) subtotal += item.unitPrice * item.quantity;
-    }
+    const { validatedItems } = validatedResult;
 
     // Obtener o crear carrito activo
     let cart = await upsertActiveCart(sessionId, userId, cityId);
@@ -49,28 +52,28 @@ export async function POST(request: NextRequest) {
       });
 
       // Deduplicar por (productId, variantId) para evitar violaciones de índice único
-      const itemMap = new Map<string, typeof items[number]>();
-      for (const item of items) {
+      const itemMap = new Map<string, typeof validatedItems[number]>();
+      for (const item of validatedItems) {
         const key = `${item.productId}::${item.variantId ?? "base"}`;
         itemMap.set(key, item);
       }
       const deduplicatedItems = Array.from(itemMap.values());
 
-      // Crear nuevos items
+      // Crear nuevos items con datos y precios validados en servidor
       await db.cartItem.createMany({
-        data: deduplicatedItems.map((item: { productId: string; variantId?: string | null; variantName?: string | null; variantCode?: string | null; quantity: number; unitPrice?: number }) => ({
+        data: deduplicatedItems.map((item) => ({
           cartId: cart.id,
           productId: item.productId,
-          variantId: item.variantId || null,
-          variantName: item.variantName || null,
-          variantCode: item.variantCode || null,
+          variantId: item.variantId,
+          variantName: item.variantName,
+          variantCode: item.variantCode,
           quantity: item.quantity,
-          unitPrice: item.unitPrice || null,
+          unitPrice: item.unitPrice,
         })),
       });
     } else if (action === "add") {
       // Agregar items (sin eliminar anteriores)
-      const itemsToAdd = items.filter((newItem: any) => {
+      const itemsToAdd = validatedItems.filter((newItem) => {
         const exists = cart.items?.some(
           (existing) =>
             existing.productId === newItem.productId &&
@@ -81,40 +84,20 @@ export async function POST(request: NextRequest) {
 
       if (itemsToAdd.length > 0) {
         await db.cartItem.createMany({
-          data: itemsToAdd.map((item: { productId: string; variantId?: string | null; variantName?: string | null; variantCode?: string | null; quantity: number; unitPrice?: number }) => ({
+          data: itemsToAdd.map((item) => ({
             cartId: cart.id,
             productId: item.productId,
-            variantId: item.variantId || null,
-            variantName: item.variantName || null,
-            variantCode: item.variantCode || null,
+            variantId: item.variantId,
+            variantName: item.variantName,
+            variantCode: item.variantCode,
             quantity: item.quantity,
-            unitPrice: item.unitPrice || null,
+            unitPrice: item.unitPrice,
           })),
         });
       }
 
-      // Actualizar cantidades de items existentes
-      for (const item of items) {
-        const existing = cart.items?.find(
-          (ci) =>
-            ci.productId === item.productId &&
-            (ci.variantId ?? null) === (item.variantId ?? null)
-        );
-        if (existing && existing.quantity !== item.quantity) {
-          await db.cartItem.update({
-            where: { id: existing.id },
-            data: {
-              quantity: item.quantity,
-              unitPrice: item.unitPrice || null,
-              variantName: item.variantName || null,
-              variantCode: item.variantCode || null,
-            },
-          });
-        }
-      }
-    } else if (action === "update") {
-      // Actualizar items específicos sin eliminar
-      for (const item of items) {
+      // Actualizar cantidades y precios validados de items existentes
+      for (const item of validatedItems) {
         const existing = cart.items?.find(
           (ci) =>
             ci.productId === item.productId &&
@@ -125,14 +108,43 @@ export async function POST(request: NextRequest) {
             where: { id: existing.id },
             data: {
               quantity: item.quantity,
-              unitPrice: item.unitPrice || null,
-              variantName: item.variantName || null,
-              variantCode: item.variantCode || null,
+              unitPrice: item.unitPrice,
+              variantName: item.variantName,
+              variantCode: item.variantCode,
+            },
+          });
+        }
+      }
+    } else if (action === "update") {
+      // Actualizar items específicos sin eliminar
+      for (const item of validatedItems) {
+        const existing = cart.items?.find(
+          (ci) =>
+            ci.productId === item.productId &&
+            (ci.variantId ?? null) === (item.variantId ?? null)
+        );
+        if (existing) {
+          await db.cartItem.update({
+            where: { id: existing.id },
+            data: {
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              variantName: item.variantName,
+              variantCode: item.variantCode,
             },
           });
         }
       }
     }
+
+    // Recalcular el subtotal total del carrito directamente desde los ítems en base de datos
+    const allCartItems = await db.cartItem.findMany({
+      where: { cartId: cart.id },
+    });
+    const subtotal = allCartItems.reduce(
+      (sum, item) => sum + (item.unitPrice || 0) * item.quantity,
+      0
+    );
 
     // Actualizar datos del carrito
     cart = await db.cart.update({
