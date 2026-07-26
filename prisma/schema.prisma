@@ -295,6 +295,8 @@ model ShippingRoute {
   orders                Order[]
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
+
+  @@index([departureDaysOfWeek])
 }
 
 // =====================
