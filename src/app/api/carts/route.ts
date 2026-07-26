@@ -27,6 +27,37 @@ export async function POST(request: NextRequest) {
     const userId = currentUser?.id ?? null;
 
     let validatedResult;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      if (action === "save" || action === "clear") {
+        let cart = await upsertActiveCart(sessionId, userId, cityId);
+        await db.cartItem.deleteMany({
+          where: { cartId: cart.id },
+        });
+        cart = await db.cart.update({
+          where: { id: cart.id },
+          data: {
+            subtotal: 0,
+            updatedAt: new Date(),
+          },
+          include: { items: true },
+        });
+        return NextResponse.json({
+          success: true,
+          data: {
+            id: cart.id,
+            uuid: cart.uuid,
+            itemCount: 0,
+            subtotal: 0,
+          },
+          message: "Carrito vaciado exitosamente",
+        });
+      }
+      return NextResponse.json(
+        { success: false, error: "El carrito debe tener al menos un producto." },
+        { status: 400 }
+      );
+    }
+
     try {
       validatedResult = await validateAndPriceItems(items);
     } catch (err) {
@@ -259,6 +290,50 @@ export async function GET(request: NextRequest) {
     console.error("Error fetching cart:", error);
     return NextResponse.json(
       { success: false, error: "Error al obtener el carrito" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const sessionId = request.headers.get("x-session-id");
+    const currentUser = await getCurrentUser();
+    const userId = currentUser?.id ?? null;
+
+    if (!sessionId && !userId) {
+      return NextResponse.json({ success: true, message: "Sin carrito activo para vaciar" });
+    }
+
+    const orConditions: Array<{ sessionId?: string | null; userId?: string; status: string }> = [];
+    if (sessionId) orConditions.push({ sessionId, status: "activo" });
+    if (userId) orConditions.push({ userId, status: "activo" });
+
+    const cart = await db.cart.findFirst({
+      where: { OR: orConditions },
+    });
+
+    if (cart) {
+      await db.cartItem.deleteMany({
+        where: { cartId: cart.id },
+      });
+      await db.cart.update({
+        where: { id: cart.id },
+        data: {
+          subtotal: 0,
+          updatedAt: new Date(),
+        },
+      });
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: "Carrito vaciado exitosamente",
+    });
+  } catch (error) {
+    console.error("Error clearing cart:", error);
+    return NextResponse.json(
+      { success: false, error: "Error al vaciar el carrito" },
       { status: 500 }
     );
   }

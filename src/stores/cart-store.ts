@@ -118,6 +118,9 @@ export const useCartStore = create<CartState>()(
 
       clearCart: () => {
         set({ items: [], savedCartUuid: null, customerInfo: emptyCustomerInfo });
+        fetch("/api/carts", {
+          method: "DELETE",
+        }).catch(() => {});
       },
 
       setOpen: (open) => set({ isOpen: open }),
@@ -133,7 +136,16 @@ export const useCartStore = create<CartState>()(
 
       syncToServer: async () => {
         const { items, customerInfo } = get();
-        if (items.length === 0) return;
+        if (items.length === 0) {
+          try {
+            await fetch("/api/carts", {
+              method: "DELETE",
+            });
+          } catch {
+            // Silencioso
+          }
+          return;
+        }
 
         const body = {
           items: items.map((item) => ({

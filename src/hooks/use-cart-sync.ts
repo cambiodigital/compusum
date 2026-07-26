@@ -14,10 +14,13 @@ export function useCartSync() {
   const items = useCartStore((s) => s.items);
   const syncToServer = useCartStore((s) => s.syncToServer);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isInitialMount = useRef(true);
 
   useEffect(() => {
-    // Sin ítems no hay nada que sincronizar
-    if (items.length === 0) return;
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
 
     if (timerRef.current) clearTimeout(timerRef.current);
 
