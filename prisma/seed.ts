@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { seedLogistics } from "./seed-logistics";
 
 const prisma = new PrismaClient();
 
@@ -362,123 +363,9 @@ async function main() {
   console.log("ℹ️ Seed sin productos hardcodeados. Carga el catálogo por importación o panel admin.");
 
   // =====================
-  // 8. CREAR DEPARTAMENTOS Y CIUDADES CON RUTAS
+  // 8. CREAR DEPARTAMENTOS Y CIUDADES CON RUTAS (LOGÍSTICA)
   // =====================
-  const depsAndCities = [
-    {
-      dept: { name: "Risaralda", code: "RIS" },
-      cities: [
-        { name: "Pereira", routeName: "Eje Cafetero", departureDaysOfWeek: [1, 3, 5] }, // Lun, Mié, Vie
-        { name: "Dosquebradas", routeName: "Eje Cafetero", departureDaysOfWeek: [1, 3, 5] },
-        { name: "La Virginia", routeName: "Eje Cafetero", departureDaysOfWeek: [1, 3, 5] },
-      ],
-    },
-    {
-      dept: { name: "Caldas", code: "CAL" },
-      cities: [
-        { name: "Manizales", routeName: "Zona Centro Norte", departureDaysOfWeek: [1] }, // Lunes
-        { name: "Villamaría", routeName: "Zona Centro Norte", departureDaysOfWeek: [1] },
-      ],
-    },
-    {
-      dept: { name: "Quindío", code: "QUI" },
-      cities: [
-        { name: "Armenia", routeName: "Eje Cafetero", departureDaysOfWeek: [1, 3, 5] },
-        { name: "Calarcá", routeName: "Eje Cafetero", departureDaysOfWeek: [1, 3, 5] },
-      ],
-    },
-    {
-      dept: { name: "Valle del Cauca", code: "VAL" },
-      cities: [
-        { name: "Cali", routeName: "Occidente", departureDaysOfWeek: [2, 4] }, // Mar, Jue
-        { name: "Palmira", routeName: "Occidente", departureDaysOfWeek: [2, 4] },
-        { name: "Candelaria", routeName: "Occidente", departureDaysOfWeek: [2, 4] },
-      ],
-    },
-    {
-      dept: { name: "Cauca", code: "CAU" },
-      cities: [
-        { name: "Popayán", routeName: "Zona Sur", departureDaysOfWeek: [3] }, // Miércoles
-      ],
-    },
-    {
-      dept: { name: "Cundinamarca", code: "CUN" },
-      cities: [
-        { name: "Bogotá", routeName: "Bogotá Capital", departureDaysOfWeek: [1, 2, 3, 4, 5] }, // Lun-Vie
-        { name: "Zipaquirá", routeName: "Sabana de Bogotá", departureDaysOfWeek: [2, 5] },
-        { name: "Mosquera", routeName: "Sabana de Bogotá", departureDaysOfWeek: [2, 5] },
-      ],
-    },
-    {
-      dept: { name: "Atlantico", code: "ATL" },
-      cities: [
-        { name: "Barranquilla", routeName: "Zona Caribe", departureDaysOfWeek: [4, 6] }, // Jue, Sáb
-        { name: "Soledad", routeName: "Zona Caribe", departureDaysOfWeek: [4, 6] },
-      ],
-    },
-  ];
-
-  // Create or update shipping routes
-  const routesMap = new Map<string, string>();
-  for (const { dept, cities } of depsAndCities) {
-    const department = await prisma.department.upsert({
-      where: { code: dept.code },
-      update: { isActive: true },
-      create: { name: dept.name, code: dept.code, isActive: true },
-    });
-
-    for (const city of cities) {
-      const routeName = city.routeName;
-      if (!routesMap.has(routeName)) {
-        // Find existing route by name
-        let route = await prisma.shippingRoute.findFirst({
-          where: { name: routeName },
-        });
-
-        if (!route) {
-          // Create new route
-          route = await prisma.shippingRoute.create({
-            data: {
-              name: routeName,
-              estimatedDaysMin: 2,
-              estimatedDaysMax: 4,
-              shippingCompany: "Servientrega",
-              departureDaysOfWeek: city.departureDaysOfWeek.sort((a, b) => a - b),
-              isActive: true,
-              sortOrder: 0,
-              notes: `Ruta ${routeName} - Salidas todos los días disponibles`,
-            },
-          });
-        } else {
-          // Update existing route with new departure days
-          route = await prisma.shippingRoute.update({
-            where: { id: route.id },
-            data: {
-              departureDaysOfWeek: city.departureDaysOfWeek.sort((a, b) => a - b),
-            },
-          });
-        }
-        routesMap.set(routeName, route.id);
-      }
-
-      await prisma.city.upsert({
-        where: { slug: slugify(city.name) },
-        update: {
-          departmentId: department.id,
-          shippingRouteId: routesMap.get(routeName) || null,
-          isActive: true,
-        },
-        create: {
-          name: city.name,
-          slug: slugify(city.name),
-          departmentId: department.id,
-          shippingRouteId: routesMap.get(routeName) || null,
-          isActive: true,
-        },
-      });
-    }
-  }
-  console.log("✅ Departamentos, ciudades y rutas creadas con días de salida flexibles");
+  await seedLogistics(prisma);
 
   console.log("🎉 Seed completado exitosamente!");
 }
