@@ -5,6 +5,7 @@
 
 import { db } from './db';
 import { Prisma } from '@prisma/client';
+import { generateOrderNumber } from './order-number';
 
 /**
  * Obtiene o crea un carrito activo basado en sessionId o userId
@@ -370,7 +371,7 @@ export async function upsertOrder(
   }
 
   // Si no existe, crear nueva orden
-  const orderNumber = orderData.orderNumber || `ORD-${Date.now()}`;
+  const orderNumber = orderData.orderNumber || (await generateOrderNumber(tx));
 
   const created = await tx.order.create({
     data: {

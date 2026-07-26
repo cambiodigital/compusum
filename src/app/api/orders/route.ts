@@ -6,6 +6,7 @@ import { findBestRouteForCity, normalizeEmail, normalizePhone, upsertCheckoutCus
 import { upsertOrder, findActiveOrder } from "@/lib/order-cart-upsert";
 import { getCurrentUser } from "@/lib/auth";
 import { validateAndPriceItems, CartValidationError } from "@/lib/cart-validation";
+import { generateOrderNumber, createOrderTransactionWithRetry } from "@/lib/order-number";
 
 export async function POST(request: NextRequest) {
   try {
@@ -210,7 +211,7 @@ export async function POST(request: NextRequest) {
     }
 
     // CREAR NUEVA ORDEN
-    const newOrder = await db.$transaction(async (tx) => {
+    const newOrder = await createOrderTransactionWithRetry(async (tx) => {
       const customerResult = await upsertCheckoutCustomer(
         {
           name: safeName,
@@ -222,12 +223,7 @@ export async function POST(request: NextRequest) {
 
       const selectedRoute = await findBestRouteForCity(cityId || null, new Date(), tx);
 
-      // Generate order number: CS-YYYYMMDD-XXXX (inside transaction for atomicity)
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-      const countToday = await tx.order.count({
-        where: { orderNumber: { startsWith: `CS-${today}` } },
-      });
-      const orderNumber = `CS-${today}-${String(countToday + 1).padStart(4, "0")}`;
+      const orderNumber = await generateOrderNumber(tx);
 
       const created = await upsertOrder(
         {

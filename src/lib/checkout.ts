@@ -2,6 +2,7 @@ import { db } from './db';
 import { hashPassword } from './auth';
 import { Prisma } from '@prisma/client';
 import { validateAndPriceItems } from './cart-validation';
+import { generateOrderNumber, createOrderTransactionWithRetry } from './order-number';
 
 function generateTemporaryPassword(): string {
   const bytes = new Uint8Array(16);
@@ -136,14 +137,15 @@ export async function findBestRouteForCity(cityId?: string | null, now = new Dat
 export async function processCheckout(checkoutData: any) {
   const { phone, email, name, items, cityId, cartId } = checkoutData;
 
-  return db.$transaction(async (tx: any) => {
+  return createOrderTransactionWithRetry(async (tx: any) => {
     const { validatedItems, subtotal } = await validateAndPriceItems(items, tx);
     const customerResult = await upsertCheckoutCustomer({ name, phone, email }, tx);
     const availableRoute = await findBestRouteForCity(cityId, new Date(), tx);
+    const orderNumber = await generateOrderNumber(tx);
 
     const order = await tx.order.create({
       data: {
-        orderNumber: `ORD-${Date.now()}`,
+        orderNumber,
         cartId,
         customerId: customerResult.customer?.id || null,
         customerName: customerResult.customer?.name || name || 'Cliente',

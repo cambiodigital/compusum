@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { generateOrderNumber, createOrderTransactionWithRetry } from "@/lib/order-number";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -24,9 +25,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ success: false, error: "Pedido no encontrado" }, { status: 404 });
     }
 
-    const newOrder = await db.order.create({
-      data: {
-        orderNumber: `ORD-${Date.now()}`,
+    const newOrder = await createOrderTransactionWithRetry(async (tx) => {
+      const orderNumber = await generateOrderNumber(tx);
+      return await tx.order.create({
+        data: {
+          orderNumber,
         cartId: order.cartId,
         customerId: order.customerId,
         agentId: order.agentId,
@@ -54,6 +57,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         },
       },
       include: { items: true },
+    });
     });
 
     return NextResponse.json({ success: true, data: newOrder });
