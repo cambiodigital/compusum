@@ -11,8 +11,6 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ARG DATABASE_URL
-ENV DATABASE_URL=$DATABASE_URL
 # Generamos el Prisma Client antes de hacer el build de Next.js
 RUN bunx prisma generate
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -22,8 +20,6 @@ RUN bun run build
 FROM base AS runner
 WORKDIR /app
 
-ARG DATABASE_URL
-ENV DATABASE_URL=$DATABASE_URL
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=80
