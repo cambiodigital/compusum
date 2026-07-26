@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 
 type BrandBulkScope = "selected" | "list" | "all";
 
@@ -12,14 +12,8 @@ type BrandBulkDeleteBody = {
 // POST /api/admin/brands - Create a new brand
 export async function POST(request: Request) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const body = await request.json();
     const { name, slug, description, logo, website, sortOrder, isActive, catalogMode } = body;
@@ -73,14 +67,8 @@ export async function POST(request: Request) {
 // DELETE /api/admin/brands - Bulk delete brands
 export async function DELETE(request: Request) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const body = (await request.json()) as BrandBulkDeleteBody;
     const scope = body.scope ?? "selected";

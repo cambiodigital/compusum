@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { db } from "@/lib/db";
+import { isAdminRole } from "@/lib/auth";
 
 // Routes that don't require authentication
 const publicRoutes = ["/admin/login"];
@@ -48,8 +50,11 @@ export async function proxy(request: NextRequest) {
     });
   }
 
-  // Only handle /admin routes further
-  if (!pathname.startsWith("/admin")) {
+  const isAdminPage = pathname.startsWith("/admin");
+  const isAdminApi = pathname.startsWith("/api/admin");
+
+  // Only handle /admin or /api/admin routes further
+  if (!isAdminPage && !isAdminApi) {
     return response;
   }
 
@@ -62,8 +67,49 @@ export async function proxy(request: NextRequest) {
   const sessionToken = request.cookies.get("session_token")?.value;
 
   if (!sessionToken) {
+    if (isAdminApi) {
+      return NextResponse.json(
+        { success: false, error: "No autorizado" },
+        { status: 401 }
+      );
+    }
     const loginUrl = new URL("/admin/login", request.url);
     return NextResponse.redirect(loginUrl);
+  }
+
+  try {
+    const session = await db.session.findUnique({
+      where: { token: sessionToken },
+      include: {
+        user: {
+          select: { id: true, role: true, isActive: true },
+        },
+      },
+    });
+
+    if (!session || session.expiresAt < new Date() || !session.user || !session.user.isActive) {
+      if (isAdminApi) {
+        return NextResponse.json(
+          { success: false, error: "No autorizado" },
+          { status: 401 }
+        );
+      }
+      const loginUrl = new URL("/admin/login", request.url);
+      return NextResponse.redirect(loginUrl);
+    }
+
+    if (!isAdminRole(session.user.role)) {
+      if (isAdminApi) {
+        return NextResponse.json(
+          { success: false, error: "Acceso denegado: se requiere rol administrativo" },
+          { status: 403 }
+        );
+      }
+      const loginUrl = new URL("/admin/login", request.url);
+      return NextResponse.redirect(loginUrl);
+    }
+  } catch (error) {
+    console.error("Error verificando sesión/rol en proxy:", error);
   }
 
   return response;

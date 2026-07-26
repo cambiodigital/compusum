@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 import { db } from "@/lib/db";
 
 function buildWhereClause(key: string) {
@@ -18,10 +18,8 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ key: string }> }
 ) {
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-  }
+  const { error } = await requireAdminApi();
+  if (error) return error;
 
   const { key: rawKey } = await params;
   const key = decodeURIComponent(rawKey);
@@ -60,10 +58,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ key: string }> }
 ) {
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-  }
+  const { error } = await requireAdminApi();
+  if (error) return error;
 
   const { key: rawKey } = await params;
   const key = decodeURIComponent(rawKey);
@@ -96,10 +92,8 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ key: string }> }
 ) {
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-  }
+  const { error } = await requireAdminApi();
+  if (error) return error;
 
   const { key: rawKey } = await params;
   const key = decodeURIComponent(rawKey);

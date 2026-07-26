@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { writeFile, mkdir, readdir, stat } from "fs/promises";
 import { join } from "path";
 import { v4 as uuidv4 } from "uuid";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { normalizeProductImagePath } from "@/lib/product-fallbacks";
 
@@ -75,10 +75,8 @@ async function assignImageToProduct(productId: string, imagePath: string) {
 
 export async function GET() {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const uploadsDir = join(process.cwd(), "public", "uploads");
     await mkdir(uploadsDir, { recursive: true });
@@ -108,10 +106,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const formData = await request.formData();
     const files = formData.getAll("files").filter((f): f is File => f instanceof File);

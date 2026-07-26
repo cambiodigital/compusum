@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -9,14 +9,8 @@ interface Props {
 // GET /api/admin/brands/[id] - Get a single brand
 export async function GET(request: Request, { params }: Props) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const { id } = await params;
 
@@ -52,14 +46,8 @@ export async function GET(request: Request, { params }: Props) {
 // PUT /api/admin/brands/[id] - Update a brand
 export async function PUT(request: Request, { params }: Props) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const { id } = await params;
     const body = await request.json();
@@ -122,14 +110,8 @@ export async function PUT(request: Request, { params }: Props) {
 // DELETE /api/admin/brands/[id] - Delete a brand
 export async function DELETE(request: Request, { params }: Props) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const { id } = await params;
 

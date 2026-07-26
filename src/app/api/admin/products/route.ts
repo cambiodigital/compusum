@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { db } from "@/lib/db";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 
 type ProductBulkScope = "selected" | "page" | "list" | "all";
 
@@ -69,13 +69,8 @@ function toSlug(text: string) {
 // GET /api/admin/products - List products with server-side pagination and filters
 export async function GET(request: Request) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const { searchParams } = new URL(request.url);
     const page = Math.max(1, parseInt(searchParams.get("page") || "1"));
@@ -168,14 +163,8 @@ export async function GET(request: Request) {
 // POST /api/admin/products - Create a new product
 export async function POST(request: Request) {
   try {
-    const user = await getCurrentUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const body = await request.json();
     const {
@@ -298,13 +287,8 @@ export async function POST(request: Request) {
 // DELETE /api/admin/products - Bulk delete products
 export async function DELETE(request: Request) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const body = (await request.json()) as ProductBulkDeleteBody;
     const scope = body.scope ?? "selected";

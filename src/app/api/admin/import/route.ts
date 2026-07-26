@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { getCurrentUser } from '@/lib/auth';
+import { requireAdminApi } from '@/lib/auth';
 import type { ProductGroup } from '@/lib/csv-import';
 import { normalizeProductImagePath } from '@/lib/product-fallbacks';
 
@@ -58,10 +58,8 @@ function normalizeReferenceKey(value?: string): string {
 //   query: ?duplicateMode=skip|update
 
 export async function POST(request: Request) {
-  const user = await getCurrentUser();
-  if (!user) {
-    return NextResponse.json({ success: false, error: 'No autenticado' }, { status: 401 });
-  }
+  const { error } = await requireAdminApi();
+  if (error) return error;
 
   const { searchParams } = new URL(request.url);
   const duplicateMode = searchParams.get('duplicateMode') ?? 'skip';

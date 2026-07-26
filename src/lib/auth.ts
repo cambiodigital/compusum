@@ -1,11 +1,20 @@
 import bcrypt from 'bcryptjs';
 import { db } from './db';
 import { cookies } from 'next/headers';
+import { NextResponse } from 'next/server';
 
 const SALT_ROUNDS = 10;
 const SESSION_COOKIE_NAME = 'session_token';
 export const SESSION_DURATION_HOURS_DEFAULT = 24;
 export const SESSION_DURATION_DAYS_REMEMBER_ME = 30;
+
+export const ADMIN_ROLES = ['admin', 'editor', 'AGENT'] as const;
+
+export function isAdminRole(role?: string | null): boolean {
+  if (!role) return false;
+  const normalized = role.trim().toLowerCase();
+  return ADMIN_ROLES.some((r) => r.toLowerCase() === normalized);
+}
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, SALT_ROUNDS);
@@ -81,6 +90,47 @@ export async function getCurrentUser(): Promise<{
     email: user.email,
     role: user.role,
   };
+}
+
+export async function requireAdminUser(): Promise<{
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+} | null> {
+  const user = await getCurrentUser();
+  if (!user || !isAdminRole(user.role)) {
+    return null;
+  }
+  return user;
+}
+
+export async function requireAdminApi(): Promise<{
+  error: NextResponse | null;
+  user: { id: string; name: string; email: string; role: string } | null;
+}> {
+  const user = await getCurrentUser();
+  if (!user) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: "No autorizado" },
+        { status: 401 }
+      ),
+      user: null,
+    };
+  }
+
+  if (!isAdminRole(user.role)) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: "Acceso denegado: se requiere rol administrativo" },
+        { status: 403 }
+      ),
+      user: null,
+    };
+  }
+
+  return { error: null, user };
 }
 
 export async function setSessionCookie(

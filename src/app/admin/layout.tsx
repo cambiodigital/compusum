@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { getCurrentUser, isAdminRole } from "@/lib/auth";
 import { AdminLayoutClient } from "@/components/admin/admin-layout-client";
 
 export const dynamic = "force-dynamic";
@@ -11,8 +11,10 @@ export default async function AdminLayout({
 }) {
   const user = await getCurrentUser();
 
-  // Redirect to login if not authenticated
-  // Note: We allow access to /admin/login without auth
+  if (user && !isAdminRole(user.role)) {
+    redirect("/admin/login");
+  }
+
   return (
     <AdminLayoutClient user={user || { name: "Usuario", email: "", role: "guest" }}>
       {children}

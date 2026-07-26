@@ -1,14 +1,12 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 import { normalizeProductImagePath } from "@/lib/product-fallbacks";
 
 export async function POST(request: Request) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const body = await request.json();
     const productId = typeof body.productId === "string" ? body.productId.trim() : "";

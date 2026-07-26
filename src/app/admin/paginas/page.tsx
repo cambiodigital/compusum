@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { getCurrentUser, requireAdminUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -16,7 +16,7 @@ import {
 import { revalidatePath } from "next/cache";
 
 export default async function AdminPagesPage() {
-  const user = await getCurrentUser();
+  const user = await requireAdminUser();
 
   if (!user) {
     redirect("/admin/login");
@@ -36,6 +36,9 @@ export default async function AdminPagesPage() {
 
   async function saveContactSettings(formData: FormData) {
     "use server";
+    
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
     
     const fields = [
       "whatsapp_number",

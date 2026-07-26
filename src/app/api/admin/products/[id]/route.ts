@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { revalidateTag } from 'next/cache';
 import { db } from '@/lib/db';
-import { getCurrentUser } from '@/lib/auth';
+import { requireAdminApi } from '@/lib/auth';
 
 // PUT /api/admin/products/[id] - Update product (for admin)
 export async function PUT(
@@ -9,14 +9,8 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check authentication
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: 'No autenticado' },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const { id } = await params;
     const body = await request.json();
@@ -150,14 +144,8 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check authentication
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: 'No autenticado' },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const { id } = await params;
 
