@@ -40,7 +40,7 @@ const navigation = [
 interface SidebarProps {
   user: {
     name: string;
-    email: string;
+    email: string | null;
     role: string;
   };
 }

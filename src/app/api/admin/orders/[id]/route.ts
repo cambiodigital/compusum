@@ -90,7 +90,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
           orderId: id,
           fromStatus: order.status,
           toStatus: status,
-          changedBy: user.name || "admin",
+          changedBy: user?.name || "admin",
           note: note || null,
         },
       });

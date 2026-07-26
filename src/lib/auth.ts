@@ -66,7 +66,7 @@ export async function deleteSession(token: string): Promise<void> {
 export async function getCurrentUser(): Promise<{
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   role: string;
 } | null> {
   const cookieStore = await cookies();
@@ -95,7 +95,7 @@ export async function getCurrentUser(): Promise<{
 export async function requireAdminUser(): Promise<{
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   role: string;
 } | null> {
   const user = await getCurrentUser();
@@ -107,7 +107,7 @@ export async function requireAdminUser(): Promise<{
 
 export async function requireAdminApi(): Promise<{
   error: NextResponse | null;
-  user: { id: string; name: string; email: string; role: string } | null;
+  user: { id: string; name: string; email: string | null; role: string } | null;
 }> {
   const user = await getCurrentUser();
   if (!user) {

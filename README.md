@@ -32,6 +32,7 @@ DATABASE_URL="postgresql://USUARIO:CONTRASENA@HOST:5432/BASE_DE_DATOS?schema=pub
 
 Variables opcionales segun las integraciones habilitadas:
 
+- `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_PASSWORD` y `INITIAL_ADMIN_NAME`: requeridas para la creacion inicial del usuario administrador mediante el seed en instalaciones nuevas.
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` y `TWILIO_VERIFY_SERVICE_SID`: requeridas para el login por SMS con Twilio Verify en produccion.
 - `N8N_API_KEY`: requerida para autorizar el webhook `POST /api/webhooks/n8n`.
 - `ENABLE_MOCK_PHONE_OTP=true`: habilita OTP de prueba solo en desarrollo. `MOCK_PHONE_OTP` permite cambiar el codigo de prueba.

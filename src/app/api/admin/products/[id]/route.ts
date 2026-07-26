@@ -108,14 +108,14 @@ export async function PUT(
     });
 
     // Invalidate product caches
-    revalidateTag("products");
-    revalidateTag("featured-products");
-    revalidateTag("new-products");
+    revalidateTag("products", "default");
+    revalidateTag("featured-products", "default");
+    revalidateTag("new-products", "default");
     if (existingProduct.slug) {
-      revalidateTag(`product-${existingProduct.slug}`);
+      revalidateTag(`product-${existingProduct.slug}`, "default");
     }
     if (slug && slug !== existingProduct.slug) {
-      revalidateTag(`product-${slug}`);
+      revalidateTag(`product-${slug}`, "default");
     }
 
     return NextResponse.json({
@@ -167,10 +167,10 @@ export async function DELETE(
     });
 
     // Invalidate product caches
-    revalidateTag("products");
-    revalidateTag("featured-products");
-    revalidateTag("new-products");
-    revalidateTag(`product-${existingProduct.slug}`);
+    revalidateTag("products", "default");
+    revalidateTag("featured-products", "default");
+    revalidateTag("new-products", "default");
+    revalidateTag(`product-${existingProduct.slug}`, "default");
 
     return NextResponse.json({
       success: true,

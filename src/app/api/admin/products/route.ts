@@ -260,9 +260,9 @@ export async function POST(request: Request) {
     });
 
     // Invalidate product caches
-    revalidateTag("products");
-    revalidateTag("featured-products");
-    revalidateTag("new-products");
+    revalidateTag("products", "default");
+    revalidateTag("featured-products", "default");
+    revalidateTag("new-products", "default");
 
     return NextResponse.json({
       success: true,
@@ -338,9 +338,9 @@ export async function DELETE(request: Request) {
       }));
 
     if (deletedCount > 0) {
-      revalidateTag("products");
-      revalidateTag("featured-products");
-      revalidateTag("new-products");
+      revalidateTag("products", "default");
+      revalidateTag("featured-products", "default");
+      revalidateTag("new-products", "default");
     }
 
     return NextResponse.json({
@@ -368,13 +368,8 @@ export async function DELETE(request: Request) {
 // PATCH /api/admin/products - Bulk category reassignment
 export async function PATCH(request: Request) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: "No autorizado" },
-        { status: 401 }
-      );
-    }
+    const { error } = await requireAdminApi();
+    if (error) return error;
 
     const body = (await request.json()) as {
       scope?: ProductBulkScope;
@@ -452,9 +447,9 @@ export async function PATCH(request: Request) {
       },
     });
 
-    revalidateTag("products");
-    revalidateTag("featured-products");
-    revalidateTag("new-products");
+    revalidateTag("products", "default");
+    revalidateTag("featured-products", "default");
+    revalidateTag("new-products", "default");
 
     return NextResponse.json({
       success: result.count > 0,

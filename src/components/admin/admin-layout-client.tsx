@@ -9,7 +9,7 @@ interface AdminLayoutClientProps {
   children: ReactNode;
   user: {
     name: string;
-    email: string;
+    email: string | null;
     role: string;
   };
 }

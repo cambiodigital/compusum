@@ -19,20 +19,33 @@ async function main() {
   // =====================
   // 1. CREAR USUARIO ADMIN
   // =====================
-  const hashedPassword = await bcrypt.hash("Compusum2025!", 12);
+  const adminEmail = process.env.INITIAL_ADMIN_EMAIL;
+  const adminPassword = process.env.INITIAL_ADMIN_PASSWORD;
+  const adminName = process.env.INITIAL_ADMIN_NAME || "Administrador Compusum";
 
-  const admin = await prisma.user.upsert({
-    where: { email: "admin@compusum.co" },
-    update: {},
-    create: {
-      name: "Administrador Compusum",
-      email: "admin@compusum.co",
-      password: hashedPassword,
-      role: "admin",
-      isActive: true,
-    },
+  const existingAdmin = await prisma.user.findFirst({
+    where: { role: "admin" },
   });
-  console.log("✅ Usuario admin creado:", admin.email);
+
+  if (adminEmail && adminPassword) {
+    const hashedPassword = await bcrypt.hash(adminPassword, 12);
+    const admin = await prisma.user.upsert({
+      where: { email: adminEmail },
+      update: {},
+      create: {
+        name: adminName,
+        email: adminEmail,
+        password: hashedPassword,
+        role: "admin",
+        isActive: true,
+      },
+    });
+    console.log("✅ Usuario admin procesado:", admin.email);
+  } else if (existingAdmin) {
+    console.log("ℹ️ Usuario admin ya existe en la base de datos:", existingAdmin.email);
+  } else {
+    console.log("⚠️ No se creó usuario admin inicial. Defina INITIAL_ADMIN_EMAIL e INITIAL_ADMIN_PASSWORD para crearlo.");
+  }
 
   // =====================
   // 2. CREAR CATEGORÍAS Y SUBCATEGORÍAS
