@@ -13,6 +13,7 @@ export async function GET(request: Request) {
     const search = searchParams.get('search');
     const featured = searchParams.get('featured');
     const isNew = searchParams.get('new');
+    const sortParam = searchParams.get('sort') || searchParams.get('ordenar');
     const page = parseInt(searchParams.get('page') || '1');
     const limit = Math.min(parseInt(searchParams.get('limit') || '12'), 100);
 
@@ -36,6 +37,32 @@ export async function GET(request: Request) {
       if (b) brandId = b.id;
     }
 
+    let orderBy: "createdAt" | "name" | "name_desc" | "price_asc" | "price_desc" | "relevance" = "createdAt";
+    switch (sortParam) {
+      case "nombre-asc":
+      case "name":
+        orderBy = "name";
+        break;
+      case "nombre-desc":
+      case "name_desc":
+        orderBy = "name_desc";
+        break;
+      case "precio-asc":
+      case "price_asc":
+        orderBy = "price_asc";
+        break;
+      case "precio-desc":
+      case "price_desc":
+        orderBy = "price_desc";
+        break;
+      case "recientes":
+      case "createdAt":
+        orderBy = "createdAt";
+        break;
+      default:
+        if (search) orderBy = "relevance";
+    }
+
     const [isCatalogMode, result] = await Promise.all([
       isGlobalCatalogModeEnabled(),
       searchProducts(search || '', {
@@ -45,7 +72,7 @@ export async function GET(request: Request) {
         brandId,
         isFeatured: featured === 'true' ? true : undefined,
         isNew: isNew === 'true' ? true : undefined,
-        orderBy: search ? 'relevance' : 'createdAt',
+        orderBy,
       }),
     ]);
 

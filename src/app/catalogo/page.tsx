@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { CatalogSortSelector } from "@/components/store/catalog-sort-selector";
 import Link from "next/link";
 import { getCachedCategories, getCachedBrands, getCachedGlobalCatalogMode } from "@/lib/product-cache";
 import { searchProducts } from "@/lib/product-search";
@@ -88,6 +88,7 @@ export default async function CatalogoPage({ searchParams }: PageProps) {
     // Map sort param to search helper orderBy
     let orderBy: "createdAt" | "name" | "name_desc" | "price_asc" | "price_desc" | "relevance" = "createdAt";
     switch (params.ordenar) {
+      case "recientes": orderBy = "createdAt"; break;
       case "nombre-asc": orderBy = "name"; break;
       case "nombre-desc": orderBy = "name_desc"; break;
       case "precio-asc": orderBy = "price_asc"; break;
@@ -310,18 +311,7 @@ export default async function CatalogoPage({ searchParams }: PageProps) {
                 </p>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-500">Ordenar por:</span>
-                  <Select defaultValue={params.ordenar || "recientes"}>
-                    <SelectTrigger className="w-44">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="recientes">Más recientes</SelectItem>
-                      <SelectItem value="nombre-asc">Nombre (A-Z)</SelectItem>
-                      <SelectItem value="nombre-desc">Nombre (Z-A)</SelectItem>
-                      <SelectItem value="precio-asc">Precio (menor)</SelectItem>
-                      <SelectItem value="precio-desc">Precio (mayor)</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <CatalogSortSelector currentSort={params.ordenar} />
                 </div>
               </div>
 
@@ -339,6 +329,7 @@ export default async function CatalogoPage({ searchParams }: PageProps) {
                         ...(params.marca ? { brand: params.marca } : {}),
                         ...(params.destacados === "true" ? { featured: "true" } : {}),
                         ...(params.nuevo === "true" ? { new: "true" } : {}),
+                        ...(params.ordenar ? { ordenar: params.ordenar } : {}),
                       }}
                       globalCatalogMode={globalCatalogMode}
                       pageSize={ITEMS_PER_PAGE}
