@@ -11,6 +11,8 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ARG DATABASE_URL="postgresql://postgres:postgres@localhost:5432/compusum?schema=public"
+ENV DATABASE_URL=$DATABASE_URL
 # Generamos el Prisma Client antes de hacer el build de Next.js
 RUN bunx prisma generate
 ENV NEXT_TELEMETRY_DISABLED=1
