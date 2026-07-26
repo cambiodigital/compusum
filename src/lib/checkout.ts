@@ -3,6 +3,7 @@ import { hashPassword } from './auth';
 import { Prisma } from '@prisma/client';
 import { validateAndPriceItems } from './cart-validation';
 import { generateOrderNumber, createOrderTransactionWithRetry } from './order-number';
+import { getNextRouteDeparture } from './route-schedule';
 
 function generateTemporaryPassword(): string {
   const bytes = new Uint8Array(16);
@@ -122,16 +123,41 @@ export async function findBestRouteForCity(cityId?: string | null, now = new Dat
     where: {
       cities: { some: { id: cityId } },
       isActive: true,
-      departureDate: { not: null },
     },
-    orderBy: { departureDate: 'asc' },
-    take: 10,
+    orderBy: { sortOrder: 'asc' },
   });
 
-  if (!routes.length) return null;
+  if (!routes || !routes.length) return null;
 
-  const openRoute = routes.find((route: any) => !route.cutOffTime || route.cutOffTime > now);
-  return openRoute || null;
+  const openRoutes = routes.filter((route: any) => {
+    if (route.cutOffTime && new Date(route.cutOffTime) <= now) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!openRoutes.length) return null;
+
+  const routesWithNextDeparture = openRoutes.map((route: any) => {
+    let nextDeparture: Date | null = null;
+    if (route.departureDaysOfWeek && Array.isArray(route.departureDaysOfWeek) && route.departureDaysOfWeek.length > 0) {
+      nextDeparture = getNextRouteDeparture(now, route.departureDaysOfWeek).nextDepartureDate;
+    } else if (route.departureDate) {
+      nextDeparture = new Date(route.departureDate);
+    } else {
+      nextDeparture = getNextRouteDeparture(now, [1]).nextDepartureDate;
+    }
+    return { route, nextDeparture };
+  });
+
+  routesWithNextDeparture.sort((a: any, b: any) => {
+    const timeA = a.nextDeparture ? a.nextDeparture.getTime() : Infinity;
+    const timeB = b.nextDeparture ? b.nextDeparture.getTime() : Infinity;
+    if (timeA !== timeB) return timeA - timeB;
+    return (a.route.sortOrder || 0) - (b.route.sortOrder || 0);
+  });
+
+  return routesWithNextDeparture[0]?.route || null;
 }
 
 export async function processCheckout(checkoutData: any) {

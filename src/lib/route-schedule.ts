@@ -17,9 +17,9 @@ export function getNextRouteDeparture(now: Date, departureDaysOfWeek: number[]) 
   let nextDepartureDate: Date | null = null;
   let daysUntilDeparture = 0;
 
-  // Busca un día de salida en esta semana (después de hoy)
+  // Busca un día de salida en esta semana (incluyendo hoy o después)
   for (const day of sortedDays) {
-    if (day > currentDayOfWeek) {
+    if (day >= currentDayOfWeek) {
       daysUntilDeparture = day - currentDayOfWeek;
       nextDepartureDate = addDays(now, daysUntilDeparture);
       break;
