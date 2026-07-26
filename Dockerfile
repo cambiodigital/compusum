@@ -4,7 +4,7 @@ FROM oven/bun:latest AS base
 FROM base AS deps
 WORKDIR /app
 COPY package.json bun.lock* ./
-RUN bun install --frozen-lockfile
+RUN bun install
 
 # 2. Builder
 FROM base AS builder
