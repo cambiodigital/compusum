@@ -56,6 +56,16 @@ if (!databaseUrl) {
       /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Order_sessionId_status_unique_idx";?/i,
       /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Order_customerId_status_unique_idx";?/i,
       /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Cart_sessionId_status_unique_idx";?/i,
+      // Índices obsoletos de una sola columna que fueron reemplazados por índices compuestos
+      // o eliminados intencionalmente del schema (2026-07-26).
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Brand_isActive_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Category_isActive_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Category_parentId_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Product_brandId_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Product_categoryId_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Product_isActive_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Product_isFeatured_idx";?/i,
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Product_isNew_idx";?/i,
     ];
 
     const lines = stdout
