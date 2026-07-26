@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { isGlobalCatalogModeEnabled, sanitizeProductForCatalog } from '@/lib/catalog-mode';
 
 // GET /api/products/[slug] - Get product by slug
 export async function GET(
@@ -9,24 +10,31 @@ export async function GET(
   try {
     const { slug } = await params;
 
-    const product = await db.product.findUnique({
-      where: {
-        slug,
-        isActive: true,
-      },
-      include: {
-        category: true,
-        brand: true,
-        images: {
-          orderBy: { sortOrder: 'asc' },
+    const [isCatalogMode, product] = await Promise.all([
+      isGlobalCatalogModeEnabled(),
+      db.product.findUnique({
+        where: {
+          slug,
+          isActive: true,
         },
-        seasons: {
-          include: {
-            season: true,
+        include: {
+          category: true,
+          brand: true,
+          images: {
+            orderBy: { sortOrder: 'asc' },
+          },
+          seasons: {
+            include: {
+              season: true,
+            },
+          },
+          variants: {
+            where: { isActive: true },
+            orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
           },
         },
-      },
-    });
+      }),
+    ]);
 
     if (!product) {
       return NextResponse.json(
@@ -41,9 +49,11 @@ export async function GET(
       data: { viewsCount: { increment: 1 } },
     });
 
+    const sanitizedProduct = sanitizeProductForCatalog(product, isCatalogMode);
+
     return NextResponse.json({
       success: true,
-      data: product,
+      data: sanitizedProduct,
     });
   } catch (error) {
     console.error('Error fetching product:', error);

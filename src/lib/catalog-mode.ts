@@ -65,3 +65,81 @@ export function resolveCatalogMode(
     globalCatalogMode
   );
 }
+
+/**
+ * Evaluates whether catalog mode applies to a product based on product,
+ * category, brand, or global store catalog mode settings.
+ */
+export function isProductCatalogMode(
+  product: {
+    catalogMode?: boolean | null;
+    category?: { catalogMode?: boolean | null } | null;
+    categoryCatalogMode?: boolean | null;
+    brand?: { catalogMode?: boolean | null } | null;
+    brandCatalogMode?: boolean | null;
+  },
+  globalCatalogMode: boolean
+): boolean {
+  if (!product) return globalCatalogMode;
+
+  const productMode = Boolean(product.catalogMode);
+  const categoryMode = Boolean(
+    product.category?.catalogMode ?? product.categoryCatalogMode
+  );
+  const brandMode = Boolean(
+    product.brand?.catalogMode ?? product.brandCatalogMode
+  );
+
+  return resolveCatalogMode(
+    productMode,
+    categoryMode,
+    brandMode,
+    globalCatalogMode
+  );
+}
+
+/**
+ * Strips prices (price and wholesalePrice) from a product object (and its variants if any)
+ * if catalog mode is active for that product or globally.
+ */
+export function sanitizeProductForCatalog<T extends Record<string, any>>(
+  product: T,
+  globalCatalogMode: boolean
+): T {
+  if (!product) return product;
+
+  const activeCatalogMode = isProductCatalogMode(product, globalCatalogMode);
+
+  if (!activeCatalogMode) {
+    return product;
+  }
+
+  const sanitized = {
+    ...product,
+    price: null,
+    wholesalePrice: null,
+  };
+
+  if (Array.isArray(sanitized.variants)) {
+    sanitized.variants = sanitized.variants.map((variant: any) => ({
+      ...variant,
+      price: null,
+      wholesalePrice: null,
+    }));
+  }
+
+  return sanitized;
+}
+
+/**
+ * Sanitizes an array of product objects for catalog mode.
+ */
+export function sanitizeProductsForCatalog<T extends Record<string, any>>(
+  products: T[],
+  globalCatalogMode: boolean
+): T[] {
+  return products.map((product) =>
+    sanitizeProductForCatalog(product, globalCatalogMode)
+  );
+}
+

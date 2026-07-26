@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/auth';
 import { searchProducts } from '@/lib/product-search';
+import { isGlobalCatalogModeEnabled, sanitizeProductsForCatalog } from '@/lib/catalog-mode';
 
 // GET /api/products - List products with filters
 export async function GET(request: Request) {
@@ -35,20 +36,25 @@ export async function GET(request: Request) {
       if (b) brandId = b.id;
     }
 
-    const result = await searchProducts(search || '', {
-      limit,
-      offset: (page - 1) * limit,
-      categoryIds,
-      brandId,
-      isFeatured: featured === 'true' ? true : undefined,
-      isNew: isNew === 'true' ? true : undefined,
-      orderBy: search ? 'relevance' : 'createdAt',
-    });
+    const [isCatalogMode, result] = await Promise.all([
+      isGlobalCatalogModeEnabled(),
+      searchProducts(search || '', {
+        limit,
+        offset: (page - 1) * limit,
+        categoryIds,
+        brandId,
+        isFeatured: featured === 'true' ? true : undefined,
+        isNew: isNew === 'true' ? true : undefined,
+        orderBy: search ? 'relevance' : 'createdAt',
+      }),
+    ]);
+
+    const sanitizedProducts = sanitizeProductsForCatalog(result.products, isCatalogMode);
 
     return NextResponse.json({
       success: true,
       data: {
-        products: result.products,
+        products: sanitizedProducts,
         pagination: {
           page,
           limit,

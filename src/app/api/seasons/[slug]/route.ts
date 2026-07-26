@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { isGlobalCatalogModeEnabled, sanitizeProductsForCatalog } from '@/lib/catalog-mode';
 
 // GET /api/seasons/[slug] - Get season with products
 export async function GET(
@@ -29,57 +30,62 @@ export async function GET(
     }
 
     // Get products in season
-    const [products, total] = await Promise.all([
-      db.product.findMany({
-        where: {
-          seasons: {
-            some: {
-              seasonId: season.id,
+    const [isCatalogMode, [products, total]] = await Promise.all([
+      isGlobalCatalogModeEnabled(),
+      Promise.all([
+        db.product.findMany({
+          where: {
+            seasons: {
+              some: {
+                seasonId: season.id,
+              },
+            },
+            isActive: true,
+          },
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            sku: true,
+            price: true,
+            wholesalePrice: true,
+            minWholesaleQty: true,
+            stockStatus: true,
+            isFeatured: true,
+            isNew: true,
+            catalogMode: true,
+            category: { select: { id: true, name: true, slug: true, catalogMode: true } },
+            brand: { select: { id: true, name: true, slug: true, catalogMode: true } },
+            images: {
+              where: { isPrimary: true },
+              take: 1,
+              select: { imagePath: true, thumbnailPath: true, altText: true },
             },
           },
-          isActive: true,
-        },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          sku: true,
-          price: true,
-          wholesalePrice: true,
-          minWholesaleQty: true,
-          stockStatus: true,
-          isFeatured: true,
-          isNew: true,
-          catalogMode: true,
-          category: { select: { name: true, slug: true, catalogMode: true } },
-          brand: { select: { name: true, slug: true, catalogMode: true } },
-          images: {
-            where: { isPrimary: true },
-            take: 1,
-            select: { imagePath: true, thumbnailPath: true, altText: true },
-          },
-        },
-        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
-        skip,
-        take: limit,
-      }),
-      db.product.count({
-        where: {
-          seasons: {
-            some: {
-              seasonId: season.id,
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+          skip,
+          take: limit,
+        }),
+        db.product.count({
+          where: {
+            seasons: {
+              some: {
+                seasonId: season.id,
+              },
             },
+            isActive: true,
           },
-          isActive: true,
-        },
-      }),
+        }),
+      ]),
     ]);
+
+    const sanitizedProducts = sanitizeProductsForCatalog(products, isCatalogMode);
 
     return NextResponse.json({
       success: true,
       data: {
         season,
-        products,
+        products: sanitizedProducts,
         pagination: {
           page,
           limit,

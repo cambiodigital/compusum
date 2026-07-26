@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { isGlobalCatalogModeEnabled } from '@/lib/catalog-mode';
+import { isGlobalCatalogModeEnabled, sanitizeProductForCatalog } from '@/lib/catalog-mode';
 
 export async function GET(request: Request) {
   try {
@@ -50,18 +50,11 @@ export async function GET(request: Request) {
     ]);
 
     const formattedProducts = products.map(product => {
-      const productCatalogMode =
-        product.catalogMode ||
-        product.category?.catalogMode ||
-        product.brand?.catalogMode ||
-        isCatalogMode;
-
-      return {
+      const formatted = {
         ...product,
         variantCount: product._count.variants,
-        price: productCatalogMode ? null : product.price,
-        wholesalePrice: productCatalogMode ? null : product.wholesalePrice,
       };
+      return sanitizeProductForCatalog(formatted, isCatalogMode);
     });
 
     return NextResponse.json({

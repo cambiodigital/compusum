@@ -183,12 +183,24 @@ export async function searchProducts(
 export async function searchProductSuggestions(
   query: string,
   limit = 5
-): Promise<{ id: string; name: string; slug: string; sku: string | null; price: number | null; categoryName: string | null; brandName: string | null }[]> {
+): Promise<{
+  id: string;
+  name: string;
+  slug: string;
+  sku: string | null;
+  price: number | null;
+  categoryName: string | null;
+  brandName: string | null;
+  catalogMode?: boolean;
+  categoryCatalogMode?: boolean;
+  brandCatalogMode?: boolean;
+}[]> {
   if (!query.trim()) return [];
 
   const sql = `
-    SELECT p."id", p."name", p."slug", p."sku", p."price",
-           c."name" as "categoryName", b."name" as "brandName"
+    SELECT p."id", p."name", p."slug", p."sku", p."price", p."catalogMode",
+           c."name" as "categoryName", c."catalogMode" as "categoryCatalogMode",
+           b."name" as "brandName", b."catalogMode" as "brandCatalogMode"
     FROM "Product" p
     LEFT JOIN "Category" c ON c."id" = p."categoryId"
     LEFT JOIN "Brand" b ON b."id" = p."brandId"

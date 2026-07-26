@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { getCachedFeaturedProducts, getCachedNewProducts, getCachedCategories, getCachedBrands } from '@/lib/product-cache';
+import { getCachedFeaturedProducts, getCachedNewProducts, getCachedCategories, getCachedBrands, getCachedGlobalCatalogMode } from '@/lib/product-cache';
+import { sanitizeProductsForCatalog } from '@/lib/catalog-mode';
 
 // Helper function to build category tree
 function buildCategoryTree(categories: any[], parentId: string | null = null): any[] {
@@ -20,6 +21,7 @@ export async function GET() {
 
     // Fetch all homepage data in parallel (products, categories, brands use cache)
     const [
+      isCatalogMode,
       banners,
       featuredProducts,
       newProducts,
@@ -28,6 +30,8 @@ export async function GET() {
       activeSeason,
       settings,
     ] = await Promise.all([
+      getCachedGlobalCatalogMode(),
+
       // Get hero banners
       db.banner.findMany({
         where: {
@@ -73,6 +77,7 @@ export async function GET() {
             include: {
               product: {
                 include: {
+                  category: { select: { id: true, name: true, slug: true, catalogMode: true } },
                   brand: true,
                   images: {
                     orderBy: { sortOrder: 'asc' },
@@ -162,6 +167,9 @@ export async function GET() {
     // Transform active season with products
     let seasonData = null;
     if (activeSeason) {
+      const seasonProducts = activeSeason.products
+        .slice(0, 4)
+        .map((ps) => ps.product);
       seasonData = {
         id: activeSeason.id,
         name: activeSeason.name,
@@ -169,9 +177,7 @@ export async function GET() {
         description: activeSeason.description,
         image: activeSeason.image,
         colorHex: activeSeason.colorHex,
-        products: activeSeason.products
-          .slice(0, 4)
-          .map((ps) => ps.product),
+        products: sanitizeProductsForCatalog(seasonProducts, isCatalogMode),
       };
     }
 
@@ -179,8 +185,8 @@ export async function GET() {
       success: true,
       data: {
         banners: activeBanners,
-        featuredProducts,
-        newProducts,
+        featuredProducts: sanitizeProductsForCatalog(featuredProducts, isCatalogMode),
+        newProducts: sanitizeProductsForCatalog(newProducts, isCatalogMode),
         categories: categoryTree,
         brands: brandsWithCount.slice(0, 8),
         activeSeason: seasonData,
