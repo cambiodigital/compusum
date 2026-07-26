@@ -387,8 +387,8 @@ model Order {
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
-  @@unique([sessionId, status]) // Garantiza un único pedido activo por sesión para usuarios invitados
-  @@unique([customerId, status]) // Garantiza un único pedido activo por usuario logueado
+  @@index([sessionId, status])
+  @@index([customerId, status])
   @@index([status])
   @@index([orderNumber])
   @@index([cartId])
