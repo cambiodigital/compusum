@@ -113,19 +113,26 @@ export async function createOrderFromCart(
     typeof input.customerPhone === "string" ? input.customerPhone : null
   );
 
-  const safeName = text(input.customerName, 200) || "Cliente";
+  const rawName = text(input.customerName, 200);
   const safeCompany = text(input.customerCompany, 200);
   const safeNotes = text(input.notes, 1000);
   const cityId = text(input.cityId, 64);
   const sentVia = text(input.sentVia, 32);
 
-  if (!safeName && !normalizedEmail && !normalizedPhone) {
+  // Contacto obligatorio SOLO cuando la solicitud NO proviene de una sesión
+  // de cliente autenticado (invitados y checkouts asistidos por admin/agent):
+  // sin nombre, teléfono ni correo no hay enlace CRM ni ruteo posible. Un
+  // CUSTOMER autenticado hereda la identidad de su cuenta (contacto opcional).
+  const isCustomerSession = sessionUser?.role?.toLowerCase() === "customer";
+  if (!isCustomerSession && !rawName && !normalizedEmail && !normalizedPhone) {
     throw new OrderCreateError(
       "CONTACT_INVALID",
       "Ingresa al menos nombre, teléfono o correo",
       400
     );
   }
+
+  const safeName = rawName || "Cliente";
 
   if (
     typeof input.customerEmail === "string" &&

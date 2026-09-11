@@ -154,6 +154,7 @@ describe('createOrderFromCart: cada checkout crea un pedido NUEVO', () => {
 
     await createOrderFromCart({
       cartId: 'cart-1',
+      customerName: 'Invitado',
       sessionUser: null,
       sessionId: 'sess-1',
     });
@@ -168,6 +169,7 @@ describe('createOrderFromCart: cada checkout crea un pedido NUEVO', () => {
 
     await createOrderFromCart({
       cartId: 'cart-1',
+      customerName: 'Invitado',
       sessionUser: null,
       sessionId: 'sess-1',
     });
@@ -192,6 +194,7 @@ describe('createOrderFromCart: cada checkout crea un pedido NUEVO', () => {
     await expect(
       createOrderFromCart({
         cartId: 'cart-1',
+        customerName: 'Invitado',
         sessionUser: null,
         sessionId: 'sess-1',
       })
@@ -214,6 +217,7 @@ describe('createOrderFromCart: cada checkout crea un pedido NUEVO', () => {
     const result = await createOrderFromCart({
       cartId: 'cart-1',
       idempotencyKey: 'key-123',
+      customerName: 'Invitado',
       sessionUser: null,
       sessionId: 'sess-1',
     });
@@ -325,6 +329,7 @@ describe('createOrderFromCart: asesor y snapshot', () => {
 
     const result = await createOrderFromCart({
       cartId: 'cart-1',
+      customerName: 'Invitado',
       sessionUser: null,
       sessionId: 'sess-1',
     });
@@ -341,11 +346,13 @@ describe('createOrderFromCart: asesor y snapshot', () => {
 
     const first = await createOrderFromCart({
       cartId: 'cart-1',
+      customerName: 'Invitado',
       sessionUser: null,
       sessionId: 'sess-1',
     });
     const second = await createOrderFromCart({
       cartId: 'cart-1',
+      customerName: 'Invitado',
       sessionUser: null,
       sessionId: 'sess-1',
     });

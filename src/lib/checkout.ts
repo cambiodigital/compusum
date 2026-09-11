@@ -1,9 +1,6 @@
 import { db } from './db';
 import { hashPassword } from './auth';
 import { Prisma } from '@prisma/client';
-import { validateAndPriceItems } from './cart-validation';
-import { resolveServerPricingCustomer } from './pricing';
-import { generateOrderNumber, createOrderTransactionWithRetry } from './order-number';
 import { getNextRouteDeparture } from './route-schedule';
 import { canonicalColombiaPhone, phoneOrVariants } from './phone';
 
@@ -230,73 +227,6 @@ export async function findBestRouteForCity(cityId?: string | null, now = new Dat
   });
 
   return routesWithNextDeparture[0]?.route || null;
-}
-
-export interface ProcessCheckoutOptions {
-  /**
-   * Usuario de la sesión autenticada server-side (getCurrentUser()).
-   * Determina el enlace del pedido y el contexto del motor de precios.
-   * JAMÁS se acepta un customerId desde el navegador.
-   */
-  sessionUser?: SessionUserRef | null;
-}
-
-export async function processCheckout(
-  checkoutData: any,
-  options: ProcessCheckoutOptions = {}
-) {
-  const { phone, email, name, items, cityId, cartId } = checkoutData;
-  const sessionUser = options.sessionUser ?? null;
-
-  return createOrderTransactionWithRetry(async (tx: any) => {
-    // El cliente que determina el precio SOLO procede de la sesión
-    // autenticada o de una acción administrativa (nunca del body del invitado).
-    const pricingCustomerId = await resolveServerPricingCustomer(
-      sessionUser,
-      { phone, email },
-      tx
-    );
-
-    const { validatedItems, subtotal } = await validateAndPriceItems(items, tx, {
-      customerId: pricingCustomerId,
-    });
-
-    const customerResult = await resolveOrderCustomer(
-      sessionUser,
-      { name, phone, email },
-      tx
-    );
-    const availableRoute = await findBestRouteForCity(cityId, new Date(), tx);
-    const orderNumber = await generateOrderNumber(tx);
-
-    const order = await tx.order.create({
-      data: {
-        orderNumber,
-        cartId,
-        customerId: customerResult.customer?.id || null,
-        customerName: customerResult.customer?.name || name || 'Cliente',
-        customerEmail: customerResult.normalizedEmail,
-        customerPhone: customerResult.normalizedPhone,
-        agentId: customerResult.assignedAgentId,
-        cityId,
-        routeId: availableRoute?.id,
-        subtotal,
-        items: {
-          create: validatedItems.map((item) => ({
-            productId: item.productId,
-            productName: item.productName,
-            variantId: item.variantId,
-            variantName: item.variantName,
-            variantCode: item.variantCode,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-          })),
-        },
-      },
-    });
-
-    return { order, route: availableRoute };
-  });
 }
 
 /**

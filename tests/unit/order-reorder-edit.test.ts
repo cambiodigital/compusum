@@ -71,13 +71,28 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
     historyEntries: [] as any[],
   };
 
+  // La edición condensada debe reflejarse en las lecturas posteriores
+  // (updateMany condicionado + re-lectura final dentro de la tx).
+  let lastUpdateData: any = {};
+
   const db = {
     $transaction: vi.fn(async (fn: any) => fn(db)),
+    // Lock pesimista: SELECT ... FOR UPDATE (Order en edición, Cart en reorder)
+    $queryRaw: vi.fn().mockResolvedValue([{ id: 'order-1', status: 'solicitado' }]),
+    city: {
+      findUnique: vi.fn().mockResolvedValue({ id: 'city-1', name: 'Bogotá' }),
+    },
     order: {
-      findUnique: vi.fn().mockResolvedValue(opts.order ?? null),
+      findUnique: vi.fn().mockImplementation(() =>
+        Promise.resolve(opts.order ? { ...opts.order, ...lastUpdateData } : null)
+      ),
       update: vi.fn().mockImplementation(({ data }: any) =>
         Promise.resolve({ ...opts.order, ...data, items: opts.order.items })
       ),
+      updateMany: vi.fn().mockImplementation(({ data }: any) => {
+        lastUpdateData = { ...lastUpdateData, ...data };
+        return Promise.resolve({ count: 1 });
+      }),
     },
     orderItem: {
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -145,6 +160,7 @@ describe('reorderOrderItems: el pedido origen queda intacto', () => {
     const result = await reorderOrderItems({ orderId: 'order-1', viewer: viewerA });
 
     expect(db.order.update).not.toHaveBeenCalled();
+    expect(db.order.updateMany).not.toHaveBeenCalled();
     expect(db.orderItem.deleteMany).not.toHaveBeenCalled();
     // Snapshot histórico intacto en el reporte
     expect(result.items[0].historicalUnitPrice).toBe(10000);

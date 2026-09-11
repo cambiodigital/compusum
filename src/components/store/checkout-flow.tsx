@@ -226,7 +226,9 @@ export function CheckoutFlow() {
           cartId: cartData.data.id,
           requestType,
           idempotencyKey,
-          customerName: customerInfo.name || "Cliente",
+          // Sin contacto no se fuerza un nombre: el servidor responde
+          // CONTACT_INVALID y el usuario completa sus datos (invitado).
+          customerName: customerInfo.name || null,
           customerEmail: customerInfo.email || null,
           customerPhone: customerInfo.phone || null,
           customerCompany: customerInfo.company || null,

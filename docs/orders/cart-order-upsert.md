@@ -53,6 +53,68 @@ Prueba PostgreSQL real de concurrencia: `tests/integration/order-lifecycle-pg.te
   origen queda intacto; al confirmar se genera un pedido nuevo con número
   distinto.
 
+## Atomicidad de la edición (`editCustomerOrder`)
+
+TODAS las escrituras de una edición (reemplazo de líneas, actualización del
+pedido y auditoría) ocurren dentro de UNA sola transacción:
+
+1. La validación pura del body (forma de items, formato de email) ocurre
+   ANTES de abrir la transacción: un payload inválido nunca escribe nada.
+2. Lock pesimista de la fila (`SELECT ... FOR UPDATE` sobre `Order`)
+   serializa la edición con cambios de estado concurrentes (p.ej. el webhook
+   `solicitado → compartido`); el estado se RE-chequea sobre la lectura
+   bloqueada y el update final es condicionado
+   (`updateMany where status = 'solicitado'`): doble guarda anti-carrera.
+3. `cityId` se valida contra el maestro de ciudades dentro de la transacción
+   (antes de reescribir líneas): un valor inválido responde `400 Ciudad no
+   válida` en vez de un `P2003` con el pedido ya reescrito.
+4. **Promoción cotización → pedido** (cambio de `requestType` sin editar
+   líneas): re-valida TODAS las líneas existentes en modo `pedido` (cada una
+   exige precio resuelto > 0) y REESCRIBE las líneas con los snapshots
+   re-validados (un pedido jamás conserva `unitPrice = null`), actualizando
+   el subtotal re-validado. Si alguna línea falla (precio, stock, inactivo),
+   la conversión se rechaza con 400 y el pedido permanece como cotización.
+   El paso inverso (pedido → cotización) es libre.
+
+## Atomicidad del reorder (`reorderOrderItems`)
+
+La fase de escritura del reorder ocurre dentro de UNA transacción con lock
+pesimista del carrito (`SELECT ... FOR UPDATE` sobre `Cart`, mismo patrón que
+el checkout) y RE-LECTURA fresca de sus líneas: el estado FINAL (líneas del
+carrito combinadas con las del pedido) se valida con el motor ANTES de
+destruir el carrito anterior.
+
+- `allowPartial=false` + fallo de stock al combinar (p.ej. 8 en el carrito +
+  5 del pedido con stock 10): aborta con `409` y CERO writes — el carrito del
+  cliente queda byte a byte igual.
+- `allowPartial=true`: una línea COMBINADA nunca se encoge por debajo de las
+  unidades que el cliente YA tenía; se conserva la cantidad original del
+  carrito y solo la adición del reorder se marca `exceeds_stock`.
+- El conflicto de carrito existente y la re-evaluación de bloqueos se
+  re-chequean dentro de la transacción sobre las líneas frescas.
+
+## Ruta única de checkout
+
+La ruta legada `POST /api/carts/checkout` (`processCheckout`: items desde el
+body, sin lock de carrito, sin idempotencia, sin conversión de carrito ni
+historial) fue RETIRADA. El único camino de checkout es
+`POST /api/orders` → `createOrderFromCart`, que concentra lock del carrito +
+`idempotencyKey` + conversión + `OrderStatusHistory`.
+
+## Política de ciclo de vida invitado
+
+Una sesión invitada accede a un pedido exactamente cuando el `x-session-id`
+coincide (`order-access.ts`): **el `customerId` asignado por el auto-enlace
+de contacto del checkout (`resolveOrderCustomer`) es un enlace CRM, NO una
+transferencia de propiedad** — no rompe el acceso de la sesión que creó el
+pedido. Esa sesión sigue viendo el pedido en `/api/orders/mine` (consulta
+por sessionId) y en detalle/reorder/edición, todas con la misma regla. La
+transferencia de propiedad ocurre SOLO por el flujo explícito de
+login/registro (`transferSessionDataToUser` ⇒ `order.sessionId = null`,
+`customerId = userId`): desde ahí la sesión invitada pierde acceso y la
+cuenta cliente lo gana. El aislamiento no cambia: otra sesión recibe 403 y
+un CUSTOMER autenticado nunca puede usar un sessionId de invitado.
+
 ## Pedido vs Cotización
 
 `Order.requestType = 'pedido' | 'cotizacion'` (existentes => `'pedido'`).

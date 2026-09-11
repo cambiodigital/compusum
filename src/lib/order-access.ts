@@ -10,6 +10,20 @@ import { getCurrentUser, isAdminRole } from "./auth";
  * - ADMIN (admin/editor): acceso autorizado conservado.
  * - AGENT: SIN acceso por esta vía en Fase 3 (no existe política común de
  *   portal para agentes; nunca acceso indiscriminado).
+ *
+ * POLÍTICA DE CICLO DE VIDA INVITADO: una sesión invitada accede a un pedido
+ * exactamente cuando `!viewer.user && viewer.sessionId && order.sessionId ===
+ * viewer.sessionId`. El `customerId` asignado por el auto-enlace de contacto
+ * (resolveOrderCustomer en checkout de invitados) es un enlace CRM, NO una
+ * transferencia de propiedad: NO rompe el acceso de la sesión que creó el
+ * pedido. Esa sesión sigue viéndolo en /api/orders/mine (consulta por
+ * sessionId), y en detalle/reorder/edición — mismas reglas para todas las
+ * vías. La transferencia de propiedad ocurre SOLO por el flujo explícito de
+ * login/registro (`transferSessionDataToUser` => order.sessionId = null,
+ * customerId = userId): a partir de ahí la sesión invitada pierde acceso y la
+ * cuenta cliente lo gana. El aislamiento entre sesiones no cambia: otro
+ * sessionId sigue recibiendo 403, y un CUSTOMER autenticado nunca puede usar
+ * un sessionId de invitado (su rama de rol se evalúa primero).
  */
 
 export interface OrderOwnershipRef {
@@ -57,13 +71,10 @@ export function authorizeOrderAccess(
     throw new OrderAccessError("No tienes acceso a este pedido", 403);
   }
 
-  // Invitado: match EXACTO de sessionId y pedido sin cliente asociado.
-  if (
-    !viewer.user &&
-    viewer.sessionId &&
-    order.sessionId === viewer.sessionId &&
-    !order.customerId
-  ) {
+  // Invitado: match EXACTO de sessionId. El customerId del auto-enlace CRM
+  // (contacto del checkout) NO transfiere la propiedad: la sesión creadora
+  // conserva acceso hasta la transferencia explícita por login/registro.
+  if (!viewer.user && viewer.sessionId && order.sessionId === viewer.sessionId) {
     return;
   }
 

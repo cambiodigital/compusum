@@ -24,6 +24,16 @@ import {
  *   (mode add|replace), responde con conflicto controlado para que la UI
  *   pregunte. Por defecto NO se modifica parcialmente el carrito: cargar
  *   solo los disponibles requiere `allowPartial` (confirmación explícita).
+ *
+ * ATOMICIDAD: toda la fase de escritura ocurre dentro de UNA transacción con
+ * lock pesimista del carrito (`SELECT ... FOR UPDATE`, mismo patrón que
+ * `createOrderFromCart`) y re-lectura FRESCA de sus líneas: el estado final
+ * se valida ANTES de destruir el carrito anterior. Si la validación combinada
+ * falla y `allowPartial` es falso, se aborta con 409 y CERO writes: el
+ * carrito del cliente queda exactamente como estaba. Con `allowPartial` las
+ * líneas combinadas (carrito + reorder) nunca se encogen por debajo de las
+ * unidades que el cliente YA tenía: se conserva la cantidad original del
+ * carrito y solo la adición del reorder se marca como bloqueada por stock.
  */
 
 export type ReorderItemStatus =
@@ -86,6 +96,16 @@ interface ReorderOptions {
 
 function isLoadable(status: ReorderItemStatus): boolean {
   return status === "added" || status === "requires_quote";
+}
+
+/** Línea final candidata: cantidad tentativa + unidades ya presentes en el carrito. */
+interface FinalLine {
+  productId: string;
+  variantId: string | null;
+  quantity: number;
+  unitPrice: number | null;
+  /** Cantidad que el cliente YA tenía en el carrito (null => línea solo del reorder). */
+  existingQuantity: number | null;
 }
 
 export async function reorderOrderItems(options: ReorderOptions): Promise<ReorderResult> {
@@ -265,74 +285,135 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
     };
   }
 
-  // ---- 4) Escritura del carrito con precios/mínimos/stock re-validados.
-  if (requestedMode === "replace") {
-    await db.cartItem.deleteMany({ where: { cartId: cart.id } });
-  }
+  // ---- 4) Escritura ATÓMICA: lock del carrito, validación del estado FINAL
+  // y solo entonces reemplazo de líneas. Nada se destruye antes de validar.
+  return db.$transaction(async (tx) => {
+    // a) Lock pesimista del carrito: serializa el reorder con otras escrituras
+    //    del mismo carrito (checkout, edición manual, otro reorder).
+    await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
 
-  const finalLines = new Map<
-    string,
-    { productId: string; variantId: string | null; quantity: number; unitPrice: number | null }
-  >();
+    // b) Re-lectura FRESCA tras el lock: protege frente a lost updates entre
+    //    la lectura externa y la adquisición del lock.
+    const freshCartItems = await tx.cartItem.findMany({
+      where: { cartId: cart.id },
+      select: { id: true, productId: true, variantId: true, quantity: true },
+    });
 
-  if (requestedMode !== "replace") {
-    for (const existing of cartItems) {
-      finalLines.set(`${existing.productId}::${existing.variantId ?? ""}`, {
-        productId: existing.productId,
-        variantId: existing.variantId ?? null,
-        quantity: existing.quantity,
-        unitPrice: null, // se resuelve con el motor más abajo
+    // c) Conflicto re-evaluado sobre el estado fresco (sin writes).
+    if (freshCartItems.length > 0 && !requestedMode) {
+      return {
+        conflict: { cartItemCount: freshCartItems.length },
+        items: itemResults,
+        addedCount: 0,
+        blockedCount,
+        priceChanged: priceChanged(),
+      };
+    }
+
+    // d) Defensa en profundidad: bloqueos re-chequeados dentro de la tx.
+    if (blockedCount > 0 && !options.allowPartial) {
+      return {
+        items: itemResults,
+        addedCount: 0,
+        blockedCount,
+        priceChanged: priceChanged(),
+      };
+    }
+
+    // e) Estado FINAL: add conserva las líneas frescas del carrito y combina
+    //    las del pedido; replace usa SOLO las del pedido. Nada se borra aún.
+    const finalLines = new Map<string, FinalLine>();
+
+    if (requestedMode !== "replace") {
+      for (const existing of freshCartItems) {
+        finalLines.set(`${existing.productId}::${existing.variantId ?? ""}`, {
+          productId: existing.productId,
+          variantId: existing.variantId ?? null,
+          quantity: existing.quantity,
+          unitPrice: null, // se resuelve con el motor más abajo
+          existingQuantity: existing.quantity,
+        });
+      }
+    }
+
+    for (const result of loadable) {
+      const key = `${result.productId}::${result.variantId ?? ""}`;
+      const existingLine = finalLines.get(key);
+      const quantity = (existingLine?.quantity ?? 0) + result.quantity;
+      finalLines.set(key, {
+        productId: result.productId,
+        variantId: result.variantId ?? null,
+        quantity,
+        unitPrice: null,
+        existingQuantity: existingLine?.existingQuantity ?? null,
       });
     }
-  }
 
-  for (const result of loadable) {
-    const key = `${result.productId}::${result.variantId ?? ""}`;
-    const existingLine = finalLines.get(key);
-    const quantity = (existingLine?.quantity ?? 0) + result.quantity;
-    finalLines.set(key, {
-      productId: result.productId,
-      variantId: result.variantId ?? null,
-      quantity,
-      unitPrice: null,
-    });
-  }
-
-  if (finalLines.size > 0) {
-    // Re-validación server-side de TODAS las líneas finales (motor único,
-    // modo cotización: el carrito puede contener líneas por cotizar).
-    let validatedResult: Awaited<ReturnType<typeof validateAndPriceItems>> | undefined;
-    try {
-      validatedResult = await validateAndPriceItems(
-        Array.from(finalLines.values()),
-        db,
-        { customerId: pricingCtx.customerId, requestType: "cotizacion" }
-      );
-    } catch (err) {
-      // Alguna línea combinada dejó de ser válida (p.ej. stock al sumar con
-      // el carrito). Se identifica por línea y se deja fuera SIN escribir nada.
-      if (!(err instanceof CartValidationError)) {
-        throw err;
+    // f) Validación server-side del estado FINAL (motor único, modo
+    //    cotización: el carrito puede contener líneas por cotizar).
+    let batchError: CartValidationError | undefined;
+    if (finalLines.size > 0) {
+      try {
+        const validatedResult = await validateAndPriceItems(
+          Array.from(finalLines.values()).map((line) => ({
+            productId: line.productId,
+            variantId: line.variantId,
+            quantity: line.quantity,
+          })),
+          tx,
+          { customerId: pricingCtx.customerId, requestType: "cotizacion" }
+        );
+        for (const item of validatedResult.validatedItems) {
+          const key = `${item.productId}::${item.variantId ?? ""}`;
+          const line = finalLines.get(key);
+          if (line) line.unitPrice = item.unitPrice;
+        }
+      } catch (err) {
+        if (!(err instanceof CartValidationError)) throw err;
+        batchError = err;
       }
     }
-    if (validatedResult) {
-      for (const item of validatedResult.validatedItems) {
-        const key = `${item.productId}::${item.variantId ?? ""}`;
-        const line = finalLines.get(key);
-        if (line) line.unitPrice = item.unitPrice;
+
+    // g) La validación combinada falló: decidir abort vs resolución por línea.
+    if (batchError) {
+      if (!options.allowPartial) {
+        // CERO writes: aún no se tocó ninguna fila; el carrito queda igual.
+        throw new ReorderError(
+          "Hay líneas que superan el stock disponible al combinarse con tu carrito. Tu carrito no fue modificado.",
+          409
+        );
       }
-    } else {
-      for (const line of Array.from(finalLines.values())) {
-        try {
-          const perLine = await validateAndPriceItems([line], db, {
-            customerId: pricingCtx.customerId,
-            requestType: "cotizacion",
-          });
-          const validated = perLine.validatedItems[0];
-          line.quantity = validated.quantity;
-          line.unitPrice = validated.unitPrice;
-        } catch {
-          finalLines.delete(`${line.productId}::${line.variantId ?? ""}`);
+
+      // allowPartial: resolución por línea. Una línea COMBINADA nunca se
+      // encoge por debajo de las unidades que el cliente ya tenía: si la
+      // suma carrito+reorder no es válida se conserva la cantidad ORIGINAL
+      // del carrito y solo la adición se marca como bloqueada por stock.
+      for (const [key, line] of Array.from(finalLines.entries())) {
+        const attempts =
+          line.existingQuantity !== null && line.quantity !== line.existingQuantity
+            ? [line.quantity, line.existingQuantity]
+            : [line.quantity];
+
+        let keptQuantity: number | null = null;
+        for (const attemptQty of attempts) {
+          try {
+            const perLine = await validateAndPriceItems(
+              [{ productId: line.productId, variantId: line.variantId, quantity: attemptQty }],
+              tx,
+              { customerId: pricingCtx.customerId, requestType: "cotizacion" }
+            );
+            // validateAndPriceItems no recorta cantidades: acepta la cantidad
+            // intentada o falla; nunca devuelve una cantidad distinta.
+            line.quantity = attemptQty;
+            line.unitPrice = perLine.validatedItems[0].unitPrice;
+            keptQuantity = attemptQty;
+            break;
+          } catch {
+            // siguiente intento (cantidad original del carrito)
+          }
+        }
+
+        const markBlocked = () => {
           const idx = itemResults.findIndex(
             (r) =>
               r.productId === line.productId &&
@@ -345,43 +426,53 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
               currentUnitPrice: null,
             };
           }
+        };
+
+        if (keptQuantity === null) {
+          finalLines.delete(key);
+          markBlocked();
+        } else if (keptQuantity === line.existingQuantity) {
+          // La adición del reorder fue bloqueada; las unidades originales
+          // del carrito se conservan intactas.
+          markBlocked();
         }
       }
     }
-  }
 
-  await db.cartItem.deleteMany({ where: { cartId: cart.id } });
-  if (finalLines.size > 0) {
-    await db.cartItem.createMany({
-      data: Array.from(finalLines.values()).map((line) => ({
-        cartId: cart.id,
-        productId: line.productId,
-        variantId: line.variantId,
-        quantity: line.quantity,
-        unitPrice: line.unitPrice,
-      })),
+    // h) Escrituras (dentro de la tx, DESPUÉS de validar el estado final).
+    await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+    if (finalLines.size > 0) {
+      await tx.cartItem.createMany({
+        data: Array.from(finalLines.values()).map((line) => ({
+          cartId: cart.id,
+          productId: line.productId,
+          variantId: line.variantId,
+          quantity: line.quantity,
+          unitPrice: line.unitPrice,
+        })),
+      });
+    }
+
+    // Subtotal del carrito: metadata de líneas con precio conocido.
+    const subtotal = Array.from(finalLines.values()).reduce(
+      (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
+      0
+    );
+
+    await tx.cart.update({
+      where: { id: cart.id },
+      data: { subtotal, updatedAt: new Date() },
     });
-  }
 
-  // Subtotal del carrito: metadata de líneas con precio conocido.
-  const subtotal = Array.from(finalLines.values()).reduce(
-    (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
-    0
-  );
+    const finalItemCount = finalLines.size;
+    const finalLoadable = itemResults.filter((r) => isLoadable(r.status));
 
-  await db.cart.update({
-    where: { id: cart.id },
-    data: { subtotal, updatedAt: new Date() },
+    return {
+      items: itemResults,
+      addedCount: finalLoadable.length,
+      blockedCount: itemResults.filter((r) => !isLoadable(r.status)).length,
+      cart: { id: cart.id, uuid: cart.uuid, itemCount: finalItemCount, subtotal },
+      priceChanged: priceChanged(),
+    };
   });
-
-  const finalItemCount = finalLines.size;
-  const finalLoadable = itemResults.filter((r) => isLoadable(r.status));
-
-  return {
-    items: itemResults,
-    addedCount: finalLoadable.length,
-    blockedCount: itemResults.filter((r) => !isLoadable(r.status)).length,
-    cart: { id: cart.id, uuid: cart.uuid, itemCount: finalItemCount, subtotal },
-    priceChanged: priceChanged(),
-  };
 }
