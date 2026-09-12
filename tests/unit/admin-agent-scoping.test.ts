@@ -16,6 +16,13 @@ const authState = vi.hoisted(() => ({
 }));
 
 const mockDb = vi.hoisted(() => ({
+  // Fase 4B: el PATCH ahora cambia estado dentro de UNA transacción con lock
+  // pesimista (SELECT ... FOR UPDATE). El mock expone ambos primitivos sin
+  // alterar ninguna aserción existente de este archivo.
+  $transaction: vi.fn(async (cb: (tx: unknown) => unknown) => cb(mockDb)),
+  $queryRaw: vi.fn().mockResolvedValue([
+    { id: 'order-a', status: 'solicitado', requestType: 'pedido' },
+  ]),
   user: {
     findMany: vi.fn(),
     findFirst: vi.fn(),
