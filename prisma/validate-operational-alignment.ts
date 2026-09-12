@@ -69,6 +69,9 @@ if (!databaseUrl) {
       // Índice único parcial de exclusividad de perfil por defecto (no
       // representable en schema.prisma; vive solo en la migración SQL).
       /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"PriceProfile_isDefault_one_row";?/i,
+      // Índice único parcial de UN único carrito activo por usuario (no
+      // representable en schema.prisma; vive solo en la migración SQL).
+      /^DROP\s+INDEX\s+(IF\s+EXISTS\s+)?("public"\.)?"Cart_userId_status_activo_unique_idx";?/i,
     ];
 
     const lines = stdout

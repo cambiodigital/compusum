@@ -3,6 +3,10 @@ import { hashPassword } from './auth';
 import { Prisma } from '@prisma/client';
 import { getNextRouteDeparture } from './route-schedule';
 import { canonicalColombiaPhone, phoneOrVariants } from './phone';
+import {
+  transferSessionCartToUserTx,
+  transferSessionOrdersToUserTx,
+} from './order-cart-upsert';
 
 function generateTemporaryPassword(): string {
   const bytes = new Uint8Array(16);
@@ -231,22 +235,17 @@ export async function findBestRouteForCity(cityId?: string | null, now = new Dat
 
 /**
  * Transferir carritos y órdenes de sesión a usuario cuando inicia sesión registrado
- * Llamar esto después de autenticar un usuario con sessionId
+ * Llamar esto después de autenticar un usuario con sessionId.
+ *
+ * La transferencia es UNA transacción REAL: orden global de locks Order→Cart
+ * (los pedidos se bloquean y transfieren primero, luego el carrito) para
+ * evitar deadlocks con reorder (Order→Cart) y checkout (Cart).
  */
 export async function transferSessionDataToUser(sessionId: string, userId: string) {
-  const { transferSessionCartToUser } = await import('./order-cart-upsert');
-  const { transferSessionOrderToUser } = await import('./order-cart-upsert');
-
   return db.$transaction(async (tx) => {
-    // Transferir carrito
-    const transferredCart = await transferSessionCartToUser(sessionId, userId);
-
-    // Transferir orden(es)
-    const transferredOrders = await transferSessionOrderToUser(sessionId, userId);
-
-    return {
-      cart: transferredCart,
-      orders: transferredOrders,
-    };
+    // Orden global: Order ANTES que Cart
+    const orders = await transferSessionOrdersToUserTx(tx, sessionId, userId);
+    const cart = await transferSessionCartToUserTx(tx, sessionId, userId);
+    return { cart, orders };
   });
 }

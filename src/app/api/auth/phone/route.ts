@@ -7,7 +7,7 @@ import {
   rotateGuestSessionCookie,
 } from '@/lib/auth';
 import { toAuthUserDTO } from '@/lib/user-dto';
-import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
+import { transferSessionDataToUser } from '@/lib/checkout';
 
 export async function POST(req: Request) {
   try {
@@ -31,15 +31,22 @@ export async function POST(req: Request) {
     const result = await loginWithPhone(phone, otpCode, sessionHours);
     await setSessionCookie(result.token, sessionHours * 60 * 60);
 
-    // Transferir carrito y pedidos de la sesión de invitado al usuario
+    // Transferencia atómica guest→cuenta. La rotación del guest session SOLO
+    // ocurre si la transferencia tuvo éxito: si falla, la sesión guest conserva
+    // acceso a su carrito/pedidos (sin estados inaccesibles).
     const sessionId = req.headers.get('x-session-id');
+    let handoffOk = true;
     if (sessionId && result.user?.id) {
-      await Promise.all([
-        transferSessionCartToUser(sessionId, result.user.id),
-        transferSessionOrderToUser(sessionId, result.user.id),
-      ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
+      try {
+        await transferSessionDataToUser(sessionId, result.user.id);
+      } catch (e) {
+        handoffOk = false;
+        console.error('Error transfiriendo sesión al usuario:', e);
+      }
     }
-    await rotateGuestSessionCookie();
+    if (handoffOk) {
+      await rotateGuestSessionCookie();
+    }
 
     // Sanitizado en el borde: NUNCA exponer hash ni datos internos aunque la
     // capa de lib se regrese algún día.

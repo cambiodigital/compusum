@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { registerCustomer, CustomerAuthError } from '@/lib/customer-auth';
-import { setSessionCookie, SESSION_DURATION_HOURS_DEFAULT } from '@/lib/auth';
+import { setSessionCookie, SESSION_DURATION_HOURS_DEFAULT, rotateGuestSessionCookie } from '@/lib/auth';
+import { transferSessionDataToUser } from '@/lib/checkout';
 import { toAuthUserDTO } from '@/lib/user-dto';
 import { checkRateLimit, recordFailedAttempt, resetRateLimit, getClientIp } from '@/lib/rate-limit';
 
@@ -32,6 +33,23 @@ export async function POST(req: NextRequest) {
 
       await resetRateLimit(ipKey);
       await setSessionCookie(result.token, SESSION_DURATION_HOURS_DEFAULT * 60 * 60);
+
+      // Transferencia atómica guest→cuenta. La rotación del guest session SOLO
+      // ocurre si la transferencia tuvo éxito: si falla, la sesión guest conserva
+      // acceso a su carrito/pedidos (sin estados inaccesibles).
+      const sessionId = req.headers.get('x-session-id');
+      let handoffOk = true;
+      if (sessionId && result.user?.id) {
+        try {
+          await transferSessionDataToUser(sessionId, result.user.id);
+        } catch (e) {
+          handoffOk = false;
+          console.error('Error transfiriendo sesión al usuario:', e);
+        }
+      }
+      if (handoffOk) {
+        await rotateGuestSessionCookie();
+      }
 
       return NextResponse.json({
         success: true,

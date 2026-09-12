@@ -112,18 +112,18 @@ export async function GET(request: NextRequest) {
         include: { items: { include: { product: true } } },
       });
     }
-    // Obtener carrito activo de la sesión/usuario
-    else {
-      const orConditions: Array<{ sessionId?: string | null; userId?: string; status: string }> = [];
-      if (sessionId) orConditions.push({ sessionId, status: 'activo' });
-      if (userId) orConditions.push({ userId, status: 'activo' });
-
-      if (orConditions.length === 0) {
-        return NextResponse.json({ success: true, data: null }, { status: 200 });
-      }
-
+    // Obtener carrito activo del visor: identidad canónica. Un CUSTOMER con
+    // x-session-id rotado no debe adoptar carritos guest (ni un guest los del
+    // CUSTOMER): con cuenta el userId es autoritativo; el sessionId rotable
+    // solo resuelve carritos de invitado.
+    else if (userId) {
       cart = await db.cart.findFirst({
-        where: { OR: orConditions },
+        where: { userId, status: 'activo' },
+        include: { items: { include: { product: true } } },
+      });
+    } else if (sessionId) {
+      cart = await db.cart.findFirst({
+        where: { sessionId, status: 'activo' },
         include: { items: { include: { product: true } } },
       });
     }

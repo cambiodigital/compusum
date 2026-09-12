@@ -25,15 +25,19 @@ import {
  *   pregunte. Por defecto NO se modifica parcialmente el carrito: cargar
  *   solo los disponibles requiere `allowPartial` (confirmación explícita).
  *
- * ATOMICIDAD: toda la fase de escritura ocurre dentro de UNA transacción con
- * lock pesimista del carrito (`SELECT ... FOR UPDATE`, mismo patrón que
- * `createOrderFromCart`) y re-lectura FRESCA de sus líneas: el estado final
- * se valida ANTES de destruir el carrito anterior. Si la validación combinada
- * falla y `allowPartial` es falso, se aborta con 409 y CERO writes: el
- * carrito del cliente queda exactamente como estaba. Con `allowPartial` las
- * líneas combinadas (carrito + reorder) nunca se encogen por debajo de las
- * unidades que el cliente YA tenía: se conserva la cantidad original del
- * carrito y solo la adición del reorder se marca como bloqueada por stock.
+ * ATOMICIDAD: toda la fase de escritura ocurre dentro de UNA transacción que
+ * comienza con el lock del Order y su reautorización autoritativa (orden
+ * global de locks Order→Cart; si el pedido fue transferido a una cuenta en
+ * pleno vuelo, el guest recibe 403 con CERO writes y sin crear carrito),
+ * continúa con el lock pesimista del carrito (`SELECT ... FOR UPDATE`, mismo
+ * patrón que `createOrderFromCart`) y la re-lectura FRESCA de sus líneas: el
+ * estado final se valida ANTES de destruir el carrito anterior. Si la
+ * validación combinada falla y `allowPartial` es falso, se aborta con 409 y
+ * CERO writes: el carrito del cliente queda exactamente como estaba. Con
+ * `allowPartial` las líneas combinadas (carrito + reorder) nunca se encogen
+ * por debajo de las unidades que el cliente YA tenía: se conserva la cantidad
+ * original del carrito y solo la adición del reorder se marca como bloqueada
+ * por stock.
  */
 
 export type ReorderItemStatus =
@@ -276,279 +280,284 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
   const requestedMode =
     options.mode === "add" || options.mode === "replace" ? options.mode : null;
 
-  // Intento de escritura sobre un carrito resuelto: lectura externa (fast-fail
-  // de conflicto/bloqueos) + transacción con lock y revalidación autoritativa.
-  const runAttempt = async (cartId: string) => {
-    const cartItems = await db.cartItem.findMany({
-      where: { cartId },
-      select: { id: true, productId: true, variantId: true, quantity: true },
-    });
+  // Intento de escritura atómico: reautorización autoritativa del Order bajo
+  // lock ANTES de tocar el carrito (orden global de locks Order→Cart) y solo
+  // entonces resolución + lock del carrito, re-lectura fresca y escrituras.
+  const runAttempt = async (): Promise<ReorderResult> => {
+    // Id del carrito intentado en ESTA pasada: permite traducir el
+    // CART_NOT_ACTIVE del lock a CartConvertedError (reintento acotado).
+    let attemptCartId: string | null = null;
 
-    if (cartItems.length > 0 && !requestedMode) {
-      return {
-        conflict: { cartItemCount: cartItems.length },
-        items: itemResults,
-        addedCount: 0,
-        blockedCount,
-        priceChanged: priceChanged(),
-      };
-    }
+    try {
+      return await db.$transaction(async (tx) => {
+        // a) Lock pesimista del Order y reautorización autoritativa bajo el
+        //    lock: si el pedido fue transferido a una cuenta mientras tanto,
+        //    el guest recibe 403 y la tx aborta con CERO writes (ni creación
+        //    de carrito). Orden global: Order ANTES que Cart.
+        const lockedOrder = await tx.$queryRaw<
+          { id: string; customerId: string | null; sessionId: string | null }[]
+        >`SELECT id, "customerId", "sessionId" FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
-    // ---- 3) Bloqueos: por defecto el carrito NO se modifica parcialmente.
-    if (blockedCount > 0 && !options.allowPartial) {
-      return {
-        items: itemResults,
-        addedCount: 0,
-        blockedCount,
-        priceChanged: priceChanged(),
-      };
-    }
+        if (!lockedOrder || lockedOrder.length === 0) {
+          throw new OrderAccessError("Pedido no encontrado", 404);
+        }
 
-    // ---- 4) Escritura ATÓMICA: lock del carrito, validación del estado FINAL
-    // y solo entonces reemplazo de líneas. Nada se destruye antes de validar.
-    return db.$transaction(async (tx) => {
-      // a) Lock pesimista del carrito + revalidación autoritativa (estado y
-      //    ownership POST-lock): serializa el reorder con otras escrituras del
-      //    mismo carrito (checkout, edición manual, otro reorder). Si el
-      //    carrito dejó de ser activo o cambió de dueño mientras se esperaba
-      //    el lock, aborta con CERO writes (CartMutationError).
-      await lockCartForMutation(tx, cartId, {
-        sessionId: viewer.sessionId ?? null,
-        userId: viewer.user?.id ?? null,
-        isAdminOrAgent,
-      });
+        authorizeOrderAccess(lockedOrder[0], viewer);
 
-      // b) Re-lectura FRESCA tras el lock: protege frente a lost updates entre
-      //    la lectura externa y la adquisición del lock.
-      const freshCartItems = await tx.cartItem.findMany({
-        where: { cartId },
-        select: { id: true, productId: true, variantId: true, quantity: true },
-      });
+        // b) Carrito ACTIVO del visor resuelto DENTRO de la tx (después del
+        //    lock del Order, misma semántica canónica que el resto del sitio).
+        const cart = await upsertActiveCart(
+          viewer.sessionId,
+          viewer.user?.id ?? null,
+          undefined,
+          tx
+        );
+        attemptCartId = cart.id;
 
-      // c) Conflicto re-evaluado sobre el estado fresco (sin writes).
-      if (freshCartItems.length > 0 && !requestedMode) {
-        return {
-          conflict: { cartItemCount: freshCartItems.length },
-          items: itemResults,
-          addedCount: 0,
-          blockedCount,
-          priceChanged: priceChanged(),
-        };
-      }
+        // c) Única disciplina: lock del carrito + revalidación autoritativa
+        //    (estado y ownership POST-lock): serializa el reorder con otras
+        //    escrituras del mismo carrito (checkout, edición manual, otro
+        //    reorder). Cart DESPUÉS del Order (orden global requerido).
+        await lockCartForMutation(tx, cart.id, {
+          sessionId: viewer.sessionId ?? null,
+          userId: viewer.user?.id ?? null,
+          isAdminOrAgent,
+        });
 
-      // d) Defensa en profundidad: bloqueos re-chequeados dentro de la tx.
-      if (blockedCount > 0 && !options.allowPartial) {
-        return {
-          items: itemResults,
-          addedCount: 0,
-          blockedCount,
-          priceChanged: priceChanged(),
-        };
-      }
+        // d) Lectura FRESCA bajo el lock: única fuente del estado del carrito.
+        const freshCartItems = await tx.cartItem.findMany({
+          where: { cartId: cart.id },
+          select: { id: true, productId: true, variantId: true, quantity: true },
+        });
 
-      // e) Estado FINAL: add conserva las líneas frescas del carrito y combina
-      //    las del pedido; replace usa SOLO las del pedido. Nada se borra aún.
-      const finalLines = new Map<string, FinalLine>();
+        // e) Conflicto sobre el estado fresco (sin writes).
+        if (freshCartItems.length > 0 && !requestedMode) {
+          return {
+            conflict: { cartItemCount: freshCartItems.length },
+            items: itemResults,
+            addedCount: 0,
+            blockedCount,
+            priceChanged: priceChanged(),
+          };
+        }
 
-      if (requestedMode !== "replace") {
-        for (const existing of freshCartItems) {
-          finalLines.set(`${existing.productId}::${existing.variantId ?? ""}`, {
-            productId: existing.productId,
-            variantId: existing.variantId ?? null,
-            quantity: existing.quantity,
-            unitPrice: null, // se resuelve con el motor más abajo
-            existingQuantity: existing.quantity,
+        // f) Defensa en profundidad: bloqueos re-chequeados dentro de la tx.
+        if (blockedCount > 0 && !options.allowPartial) {
+          return {
+            items: itemResults,
+            addedCount: 0,
+            blockedCount,
+            priceChanged: priceChanged(),
+          };
+        }
+
+        // g) Estado FINAL: add conserva las líneas frescas del carrito y combina
+        //    las del pedido; replace usa SOLO las del pedido. Nada se borra aún.
+        const finalLines = new Map<string, FinalLine>();
+
+        if (requestedMode !== "replace") {
+          for (const existing of freshCartItems) {
+            finalLines.set(`${existing.productId}::${existing.variantId ?? ""}`, {
+              productId: existing.productId,
+              variantId: existing.variantId ?? null,
+              quantity: existing.quantity,
+              unitPrice: null, // se resuelve con el motor más abajo
+              existingQuantity: existing.quantity,
+            });
+          }
+        }
+
+        for (const result of loadable) {
+          const key = `${result.productId}::${result.variantId ?? ""}`;
+          const existingLine = finalLines.get(key);
+          const quantity = (existingLine?.quantity ?? 0) + result.quantity;
+          finalLines.set(key, {
+            productId: result.productId,
+            variantId: result.variantId ?? null,
+            quantity,
+            unitPrice: null,
+            existingQuantity: existingLine?.existingQuantity ?? null,
           });
         }
-      }
 
-      for (const result of loadable) {
-        const key = `${result.productId}::${result.variantId ?? ""}`;
-        const existingLine = finalLines.get(key);
-        const quantity = (existingLine?.quantity ?? 0) + result.quantity;
-        finalLines.set(key, {
-          productId: result.productId,
-          variantId: result.variantId ?? null,
-          quantity,
-          unitPrice: null,
-          existingQuantity: existingLine?.existingQuantity ?? null,
-        });
-      }
+        // h) Validación server-side del estado FINAL (motor único, modo
+        //    cotización: el carrito puede contener líneas por cotizar).
+        let batchError: CartValidationError | undefined;
+        if (finalLines.size > 0) {
+          try {
+            const validatedResult = await validateAndPriceItems(
+              Array.from(finalLines.values()).map((line) => ({
+                productId: line.productId,
+                variantId: line.variantId,
+                quantity: line.quantity,
+              })),
+              tx,
+              { customerId: pricingCtx.customerId, requestType: "cotizacion" }
+            );
+            for (const item of validatedResult.validatedItems) {
+              const key = `${item.productId}::${item.variantId ?? ""}`;
+              const line = finalLines.get(key);
+              if (line) line.unitPrice = item.unitPrice;
+            }
+          } catch (err) {
+            if (!(err instanceof CartValidationError)) throw err;
+            batchError = err;
+          }
+        }
 
-      // f) Validación server-side del estado FINAL (motor único, modo
-      //    cotización: el carrito puede contener líneas por cotizar).
-      let batchError: CartValidationError | undefined;
-      if (finalLines.size > 0) {
-        try {
-          const validatedResult = await validateAndPriceItems(
-            Array.from(finalLines.values()).map((line) => ({
+        // i) La validación combinada falló: decidir abort vs resolución por línea.
+        if (batchError) {
+          if (!options.allowPartial) {
+            // CERO writes: aún no se tocó ninguna fila; el carrito queda igual.
+            throw new ReorderError(
+              "Hay líneas que superan el stock disponible al combinarse con tu carrito. Tu carrito no fue modificado.",
+              409
+            );
+          }
+
+          // allowPartial: resolución por línea. Una línea COMBINADA nunca se
+          // encoge por debajo de las unidades que el cliente ya tenía: si la
+          // suma carrito+reorder no es válida se conserva la cantidad ORIGINAL
+          // del carrito y solo la adición se marca como bloqueada por stock.
+          for (const [key, line] of Array.from(finalLines.entries())) {
+            const attempts =
+              line.existingQuantity !== null && line.quantity !== line.existingQuantity
+                ? [line.quantity, line.existingQuantity]
+                : [line.quantity];
+
+            let keptQuantity: number | null = null;
+            for (const attemptQty of attempts) {
+              try {
+                const perLine = await validateAndPriceItems(
+                  [{ productId: line.productId, variantId: line.variantId, quantity: attemptQty }],
+                  tx,
+                  { customerId: pricingCtx.customerId, requestType: "cotizacion" }
+                );
+                // validateAndPriceItems no recorta cantidades: acepta la cantidad
+                // intentada o falla; nunca devuelve una cantidad distinta.
+                line.quantity = attemptQty;
+                line.unitPrice = perLine.validatedItems[0].unitPrice;
+                keptQuantity = attemptQty;
+                break;
+              } catch {
+                // siguiente intento (cantidad original del carrito)
+              }
+            }
+
+            const markBlocked = () => {
+              const idx = itemResults.findIndex(
+                (r) =>
+                  r.productId === line.productId &&
+                  (r.variantId ?? null) === (line.variantId ?? null)
+              );
+              if (idx >= 0) {
+                itemResults[idx] = {
+                  ...itemResults[idx],
+                  status: "exceeds_stock",
+                  currentUnitPrice: null,
+                };
+              }
+            };
+
+            if (keptQuantity === null) {
+              finalLines.delete(key);
+              markBlocked();
+            } else if (keptQuantity === line.existingQuantity) {
+              // La adición del reorder fue bloqueada; las unidades originales
+              // del carrito se conservan intactas.
+              markBlocked();
+            }
+          }
+        }
+
+        // j) Escrituras (dentro de la tx, DESPUÉS de validar el estado final).
+        await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+        if (finalLines.size > 0) {
+          await tx.cartItem.createMany({
+            data: Array.from(finalLines.values()).map((line) => ({
+              cartId: cart.id,
               productId: line.productId,
               variantId: line.variantId,
               quantity: line.quantity,
+              unitPrice: line.unitPrice,
             })),
-            tx,
-            { customerId: pricingCtx.customerId, requestType: "cotizacion" }
-          );
-          for (const item of validatedResult.validatedItems) {
-            const key = `${item.productId}::${item.variantId ?? ""}`;
-            const line = finalLines.get(key);
-            if (line) line.unitPrice = item.unitPrice;
-          }
-        } catch (err) {
-          if (!(err instanceof CartValidationError)) throw err;
-          batchError = err;
-        }
-      }
-
-      // g) La validación combinada falló: decidir abort vs resolución por línea.
-      if (batchError) {
-        if (!options.allowPartial) {
-          // CERO writes: aún no se tocó ninguna fila; el carrito queda igual.
-          throw new ReorderError(
-            "Hay líneas que superan el stock disponible al combinarse con tu carrito. Tu carrito no fue modificado.",
-            409
-          );
+          });
         }
 
-        // allowPartial: resolución por línea. Una línea COMBINADA nunca se
-        // encoge por debajo de las unidades que el cliente ya tenía: si la
-        // suma carrito+reorder no es válida se conserva la cantidad ORIGINAL
-        // del carrito y solo la adición se marca como bloqueada por stock.
-        for (const [key, line] of Array.from(finalLines.entries())) {
-          const attempts =
-            line.existingQuantity !== null && line.quantity !== line.existingQuantity
-              ? [line.quantity, line.existingQuantity]
-              : [line.quantity];
+        // Subtotal del carrito: metadata de líneas con precio conocido.
+        const subtotal = Array.from(finalLines.values()).reduce(
+          (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
+          0
+        );
 
-          let keptQuantity: number | null = null;
-          for (const attemptQty of attempts) {
-            try {
-              const perLine = await validateAndPriceItems(
-                [{ productId: line.productId, variantId: line.variantId, quantity: attemptQty }],
-                tx,
-                { customerId: pricingCtx.customerId, requestType: "cotizacion" }
-              );
-              // validateAndPriceItems no recorta cantidades: acepta la cantidad
-              // intentada o falla; nunca devuelve una cantidad distinta.
-              line.quantity = attemptQty;
-              line.unitPrice = perLine.validatedItems[0].unitPrice;
-              keptQuantity = attemptQty;
-              break;
-            } catch {
-              // siguiente intento (cantidad original del carrito)
-            }
-          }
-
-          const markBlocked = () => {
-            const idx = itemResults.findIndex(
-              (r) =>
-                r.productId === line.productId &&
-                (r.variantId ?? null) === (line.variantId ?? null)
-            );
-            if (idx >= 0) {
-              itemResults[idx] = {
-                ...itemResults[idx],
-                status: "exceeds_stock",
-                currentUnitPrice: null,
-              };
-            }
-          };
-
-          if (keptQuantity === null) {
-            finalLines.delete(key);
-            markBlocked();
-          } else if (keptQuantity === line.existingQuantity) {
-            // La adición del reorder fue bloqueada; las unidades originales
-            // del carrito se conservan intactas.
-            markBlocked();
-          }
-        }
-      }
-
-      // h) Escrituras (dentro de la tx, DESPUÉS de validar el estado final).
-      await tx.cartItem.deleteMany({ where: { cartId } });
-      if (finalLines.size > 0) {
-        await tx.cartItem.createMany({
-          data: Array.from(finalLines.values()).map((line) => ({
-            cartId,
-            productId: line.productId,
-            variantId: line.variantId,
-            quantity: line.quantity,
-            unitPrice: line.unitPrice,
-          })),
+        await tx.cart.update({
+          where: { id: cart.id },
+          data: { subtotal, updatedAt: new Date() },
         });
-      }
 
-      // Subtotal del carrito: metadata de líneas con precio conocido.
-      const subtotal = Array.from(finalLines.values()).reduce(
-        (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
-        0
-      );
+        // uuid del carrito efectivo (bajo lock: consistente con el snapshot).
+        const cartRow = await tx.cart.findUnique({
+          where: { id: cart.id },
+          select: { uuid: true },
+        });
 
-      await tx.cart.update({
-        where: { id: cartId },
-        data: { subtotal, updatedAt: new Date() },
+        const finalItemCount = finalLines.size;
+        const finalLoadable = itemResults.filter((r) => isLoadable(r.status));
+
+        return {
+          items: itemResults,
+          addedCount: finalLoadable.length,
+          blockedCount: itemResults.filter((r) => !isLoadable(r.status)).length,
+          cart: { id: cart.id, uuid: cartRow?.uuid ?? "", itemCount: finalItemCount, subtotal },
+          priceChanged: priceChanged(),
+        };
       });
-
-      // uuid del carrito efectivo (bajo lock: consistente con el snapshot).
-      const cartRow = await tx.cart.findUnique({
-        where: { id: cartId },
-        select: { uuid: true },
-      });
-
-      const finalItemCount = finalLines.size;
-      const finalLoadable = itemResults.filter((r) => isLoadable(r.status));
-
-      return {
-        items: itemResults,
-        addedCount: finalLoadable.length,
-        blockedCount: itemResults.filter((r) => !isLoadable(r.status)).length,
-        cart: { id: cartId, uuid: cartRow?.uuid ?? "", itemCount: finalItemCount, subtotal },
-        priceChanged: priceChanged(),
-      };
-    });
-  };
-
-  // Bucle de reintentos acotado (máx. 2 intentos): si el checkout convirtió
-  // el carrito mientras se esperaba el lock, NO se escribe nada sobre el
-  // convertido (queda EXACTAMENTE intacto); se re-resuelve el carrito activo
-  // actual (1 reintento acotado) o se aborta controlado.
-  let attempt = 0;
-  while (true) {
-    const cart = await upsertActiveCart(viewer.sessionId, viewer.user?.id ?? null);
-    try {
-      return await runAttempt(cart.id);
     } catch (caught) {
-      let err: unknown = caught;
-
       // Traduce los errores de la disciplina de mutación a errores del módulo.
-      if (err instanceof CartMutationError) {
-        if (err.code === "CART_FORBIDDEN") {
+      if (caught instanceof CartMutationError) {
+        if (caught.code === "CART_FORBIDDEN") {
           throw new OrderAccessError("No tienes acceso a este carrito", 403);
         }
-        if (err.code === "CART_NOT_FOUND") {
+        if (caught.code === "CART_NOT_FOUND") {
           throw new ReorderError("Carrito no encontrado", 404);
         }
         // CART_NOT_ACTIVE: distinguir convertido (el bucle reintenta con el
         // carrito activo actual) de un carrito inactivo que upsertActiveCart
         // volvería a devolver (ese caso NO reintenta).
-        const statusNow = (
-          await db.cart.findUnique({ where: { id: cart.id }, select: { status: true } })
-        )?.status;
+        const statusNow = attemptCartId
+          ? (
+              await db.cart.findUnique({
+                where: { id: attemptCartId },
+                select: { status: true },
+              })
+            )?.status
+          : null;
         if (statusNow === "convertido") {
-          err = new CartConvertedError();
-        } else {
-          throw new ReorderError("Este carrito ya no se puede modificar", 409);
+          throw new CartConvertedError();
         }
+        throw new ReorderError("Este carrito ya no se puede modificar", 409);
       }
+      throw caught;
+    }
+  };
 
-      if (err instanceof CartConvertedError && attempt === 0) {
+  // Bucle de reintentos acotado (máx. 2 intentos): si el checkout convirtió
+  // el carrito mientras se esperaba el lock, NO se escribe nada sobre el
+  // convertido (queda EXACTAMENTE intacto); se re-resuelve el carrito activo
+  // actual (1 reintento acotado, con el Order re-bloqueado y re-autorizado)
+  // o se aborta controlado.
+  let attempt = 0;
+  while (true) {
+    try {
+      return await runAttempt();
+    } catch (caught) {
+      if (caught instanceof CartConvertedError && attempt === 0) {
         attempt += 1;
         continue;
       }
-      throw err instanceof CartConvertedError
+      throw caught instanceof CartConvertedError
         ? new ReorderError("Tu carrito fue procesado mientras se cargaba el pedido. Intentá de nuevo.", 409)
-        : err;
+        : caught;
     }
   }
 }

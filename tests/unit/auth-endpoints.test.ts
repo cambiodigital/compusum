@@ -81,9 +81,8 @@ vi.mock('@/lib/customer-auth', () => ({
   },
 }));
 
-vi.mock('@/lib/order-cart-upsert', () => ({
-  transferSessionCartToUser: vi.fn().mockResolvedValue(undefined),
-  transferSessionOrderToUser: vi.fn().mockResolvedValue(undefined),
+vi.mock('@/lib/checkout', () => ({
+  transferSessionDataToUser: vi.fn().mockResolvedValue({ cart: null, orders: null }),
 }));
 
 import { POST as phoneRoutePOST } from '@/app/api/auth/phone/route';
@@ -91,6 +90,8 @@ import { POST as customerLoginPOST } from '@/app/api/auth/customer/login/route';
 import { POST as registerPOST } from '@/app/api/auth/register/route';
 import { loginWithPhone, loginWithPassword } from '@/lib/auth-dual';
 import { registerCustomer } from '@/lib/customer-auth';
+import { transferSessionDataToUser } from '@/lib/checkout';
+import { rotateGuestSessionCookie } from '@/lib/auth';
 
 const BODY = { phone: '+57 300 123 4567', otpCode: '1234' };
 
@@ -174,6 +175,43 @@ describe('ENDPOINT /api/auth/customer/login', () => {
     expect(res.status).toBe(200);
     expectSafeUserPayload(json);
   });
+
+  it('login exitoso transfiere la sesión guest UNA vez y rota la cookie de invitado', async () => {
+    (loginWithPassword as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+
+    const res = await customerLoginPOST(
+      jsonRequest('/api/auth/customer/login', {
+        method: 'password',
+        phoneOrEmail: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(transferSessionDataToUser).toHaveBeenCalledWith('guest-session-1', RAW_DB_USER.id);
+    expect(rotateGuestSessionCookie).toHaveBeenCalledTimes(1);
+  });
+
+  it('si la transferencia guest→cuenta FALLA, el login sigue OK pero NO rota la cookie guest', async () => {
+    (loginWithPassword as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+    (transferSessionDataToUser as any).mockRejectedValueOnce(new Error('handoff down'));
+
+    const res = await customerLoginPOST(
+      jsonRequest('/api/auth/customer/login', {
+        method: 'password',
+        phoneOrEmail: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+    const json = await res.json();
+
+    // Handoff degradado: la sesión guest conserva acceso a carrito/pedidos.
+    expect(res.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(rotateGuestSessionCookie).not.toHaveBeenCalled();
+  });
 });
 
 describe('ENDPOINT /api/auth/register', () => {
@@ -192,5 +230,22 @@ describe('ENDPOINT /api/auth/register', () => {
     expect(res.status).toBe(200);
     expect(json.data.user.id).toBe(RAW_DB_USER.id);
     expectSafeUserPayload(json);
+  });
+
+  it('registro exitoso transfiere la sesión guest y rota la cookie de invitado', async () => {
+    (registerCustomer as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+
+    const res = await registerPOST(
+      jsonRequest('/api/auth/register', {
+        name: 'Cliente Crudo',
+        phone: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(transferSessionDataToUser).toHaveBeenCalledWith('guest-session-1', RAW_DB_USER.id);
+    expect(rotateGuestSessionCookie).toHaveBeenCalledTimes(1);
   });
 });

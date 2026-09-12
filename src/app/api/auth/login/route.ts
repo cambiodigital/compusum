@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifyPassword, createSession, setSessionCookie, rotateGuestSessionCookie, isAdminRole } from '@/lib/auth';
-import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
+import { transferSessionDataToUser } from '@/lib/checkout';
 import {
   getClientIp,
   checkRateLimit,
@@ -121,15 +121,23 @@ export async function POST(request: Request) {
     const token = await createSession(user.id);
     await setSessionCookie(token);
 
-    // Transferir carrito y pedidos de la sesión de invitado al usuario
+    // Transferir carrito y pedidos de la sesión de invitado al usuario.
+    // Transferencia atómica guest→cuenta. La rotación del guest session SOLO
+    // ocurre si la transferencia tuvo éxito: si falla, la sesión guest conserva
+    // acceso a su carrito/pedidos (sin estados inaccesibles).
     const sessionId = request.headers.get('x-session-id');
-    if (sessionId) {
-      await Promise.all([
-        transferSessionCartToUser(sessionId, user.id),
-        transferSessionOrderToUser(sessionId, user.id),
-      ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
+    let handoffOk = true;
+    if (sessionId && user.id) {
+      try {
+        await transferSessionDataToUser(sessionId, user.id);
+      } catch (e) {
+        handoffOk = false;
+        console.error('Error transfiriendo sesión al usuario:', e);
+      }
     }
-    await rotateGuestSessionCookie();
+    if (handoffOk) {
+      await rotateGuestSessionCookie();
+    }
 
     // Actualizar último login
     await db.user.update({

@@ -250,8 +250,11 @@ d('CONCURRENCIA con idempotencyKey: ambas solicitudes resuelven al MISMO pedido'
 });
 
 d('NUEVA SEMÁNTICA: dos pedidos legítimos del mismo CUSTOMER conviven intactos', async () => {
+  // La BD garantiza UN único carrito ACTIVO por usuario (índice parcial de
+  // 20260912120000): el segundo carrito se crea DESPUÉS de convertir el
+  // primero. La semántica probada no cambia: dos pedidos legítimos del mismo
+  // CUSTOMER conviven como 'solicitado' independientes y sin reemplazos.
   const cart1 = await createCart({ userId: customerAId, productId, quantity: 1 });
-  const cart2 = await createCart({ userId: customerAId, productId, quantity: 3 });
 
   const first = await createOrderFromCart({
     cartId: cart1.id,
@@ -260,6 +263,8 @@ d('NUEVA SEMÁNTICA: dos pedidos legítimos del mismo CUSTOMER conviven intactos
   });
 
   const firstItems = await db.orderItem.findMany({ where: { orderId: first.order.id } });
+
+  const cart2 = await createCart({ userId: customerAId, productId, quantity: 3 });
 
   const second = await createOrderFromCart({
     cartId: cart2.id,

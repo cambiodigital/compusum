@@ -347,6 +347,11 @@ model Cart {
   expiresAt       DateTime?
 
   @@unique([sessionId, status]) // Garantiza un único carrito activo por sesión
+  // Identidad canónica de usuario: la exclusividad de UN único carrito activo
+  // por userId la garantiza un índice único parcial DB-native (no representable
+  // en schema.prisma), creado por la migración 20260912120000
+  // ("Cart_userId_status_activo_unique_idx", WHERE "userId" IS NOT NULL AND
+  // "status" = 'activo').
   @@index([uuid])
   @@index([status])
   @@index([sessionId])

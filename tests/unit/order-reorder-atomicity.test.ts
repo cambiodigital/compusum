@@ -83,11 +83,18 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
         state.inTx = false;
       }
     }),
-    // Lock pesimista del carrito (SELECT ... FOR UPDATE): la fila bloqueada
-    // es un carrito ACTIVO propiedad del visor (cust-A) — lockCartForMutation
-    // re-valida status/ownership contra este snapshot.
-    $queryRaw: vi.fn().mockImplementation(() => {
-      ops.push({ op: 'lock', inTx: state.inTx });
+    // Locks pesimistas DENTRO de la tx, en orden global Order→Cart:
+    // 1) SELECT ... FROM "Order" ... FOR UPDATE (reautorización autoritativa)
+    // 2) lockCartForMutation (SELECT ... FOR UPDATE del Cart)
+    $queryRaw: vi.fn().mockImplementation((sql?: unknown) => {
+      const text = String(sql);
+      const isOrderLock = text.includes('FROM "Order"');
+      ops.push({ op: isOrderLock ? 'lock-order' : 'lock', inTx: state.inTx });
+      if (isOrderLock) {
+        return Promise.resolve([{ id: 'order-1', customerId: 'cust-A', sessionId: null }]);
+      }
+      // La fila bloqueada es un carrito ACTIVO propiedad del visor (cust-A):
+      // lockCartForMutation re-valida status/ownership contra este snapshot.
       return Promise.resolve([
         { id: 'cart-1', status: 'activo', isActive: true, sessionId: null, userId: 'cust-A' },
       ]);
@@ -248,18 +255,26 @@ describe('reorderOrderItems: atomicidad de la escritura', () => {
 
     await run();
 
-    // Lock con FOR UPDATE
-    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
-    expect(String((db.$queryRaw as any).mock.calls[0][0])).toContain('FOR UPDATE');
+    // Locks con FOR UPDATE: primero el Order (reautorización) y luego el
+    // carrito (disciplina de mutación) — orden global Order→Cart.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
+    const orderLockSql = String((db.$queryRaw as any).mock.calls[0][0]);
+    const cartLockSql = String((db.$queryRaw as any).mock.calls[1][0]);
+    expect(orderLockSql).toContain('FROM "Order"');
+    expect(orderLockSql).toContain('FOR UPDATE');
+    expect(cartLockSql).toContain('FOR UPDATE');
 
-    // Re-lectura fresca: la lectura externa + la interna (después del lock)
+    // Re-lectura fresca DENTRO de la tx: ÚNICA fuente del estado del carrito
+    // (la resolución del carrito y el chequeo de conflicto ocurren bajo lock).
     const ops = db.ops as OpRecord[];
     const reads = ops.filter((o) => o.op === 'cartItem.findMany');
-    expect(reads.length).toBeGreaterThanOrEqual(2);
-    expect(reads[0].inTx).toBe(false); // lectura externa (chequeo de conflicto)
-    expect(reads[reads.length - 1].inTx).toBe(true); // re-lectura dentro de la tx
+    expect(reads.length).toBe(1);
+    expect(reads[0].inTx).toBe(true); // re-lectura dentro de la tx
+    const orderLockIdx = ops.findIndex((o) => o.op === 'lock-order');
     const lockIdx = ops.findIndex((o) => o.op === 'lock');
     const freshReadIdx = ops.findIndex((o) => o.op === 'cartItem.findMany' && o.inTx);
+    expect(orderLockIdx).toBeGreaterThanOrEqual(0);
+    expect(lockIdx).toBeGreaterThan(orderLockIdx); // Order ANTES que Cart
     expect(freshReadIdx).toBeGreaterThan(lockIdx);
   });
 });

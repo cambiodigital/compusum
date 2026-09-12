@@ -271,10 +271,12 @@ export interface ClearActiveCartsInput {
 }
 
 /**
- * DELETE /api/carts — vacía el carrito activo del visor (por sessionId o
- * userId). Sin sesión ni cuenta, o sin carrito activo, es un no-op
- * (`skipped: true`). El lock autoritativo hace que una transferencia
- * invitado→cuenta en vuelo responda 403 en vez de vaciar el carrito ajeno.
+ * DELETE /api/carts — vacía el carrito activo del visor. Identidad canónica:
+ * con cuenta el userId es autoritativo (`{ userId, status: 'activo' }`); solo
+ * los invitados resuelven por sessionId. Sin sesión ni cuenta, o sin carrito
+ * activo, es un no-op (`skipped: true`). El lock autoritativo hace que una
+ * transferencia invitado→cuenta en vuelo responda 403 en vez de vaciar el
+ * carrito ajeno.
  */
 export async function clearActiveCarts(
   input: ClearActiveCartsInput
@@ -285,13 +287,11 @@ export async function clearActiveCarts(
     return { skipped: true };
   }
 
-  const orConditions: Array<{ sessionId?: string | null; userId?: string; status: string }> = [];
-  if (sessionId) orConditions.push({ sessionId, status: "activo" });
-  if (userId) orConditions.push({ userId, status: "activo" });
-
-  const cart = await db.cart.findFirst({
-    where: { OR: orConditions },
-  });
+  // Resolución canónica del objetivo: userId primero (un CUSTOMER con sesión
+  // rotada no debe vaciar carritos guest, ni un guest los del CUSTOMER).
+  const cart = userId
+    ? await db.cart.findFirst({ where: { userId, status: "activo" } })
+    : await db.cart.findFirst({ where: { sessionId, status: "activo" } });
 
   if (!cart) {
     return { skipped: true };
