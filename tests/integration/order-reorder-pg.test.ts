@@ -14,6 +14,9 @@ import { reorderOrderItems, ReorderError } from '@/lib/order-reorder';
  * 3. Replace con error tras el lock: el carrito anterior se conserva.
  * 4. Lost update: el reorder combina contra las líneas FRESCAS (tras el
  *    lock), no contra la lectura vieja.
+ * 5. Carrito convertido durante la espera del lock: el convertido queda
+ *    EXACTAMENTE intacto y el reorder aterriza en el carrito activo actual
+ *    (1 reintento acotado).
  *
  * Aislamiento: el visor es CUSTOMER, así que `upsertActiveCart` resuelve el
  * carrito por userId; cada test expira su carrito al terminar para que el
@@ -231,8 +234,7 @@ d('replace con error tras el lock: el carrito anterior se conserva', async () =>
   }
 }, 30000);
 
-d('lost update: el reorder combina contra las líneas FRESCAS (post-lock)', async () => {
-  const cart = await activeCartWithLine(2);
+d('lost update: el reorder combina contra las líneas FRESCAS (post-lock)', async () => {  const cart = await activeCartWithLine(2);
   const order = await seedHistoricalOrder('lost', 3);
 
   const other = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
@@ -269,5 +271,65 @@ d('lost update: el reorder combina contra las líneas FRESCAS (post-lock)', asyn
   } finally {
     await other.$disconnect();
     await expireCart(cart.id);
+  }
+}, 30000);
+
+d('checkout convierte el carrito durante la espera del lock => convertido EXACTAMENTE intacto y reorder en carrito NUEVO', async () => {
+  // El checkout (controlador) convierte el carrito mientras el reorder
+  // espera el lock: NO se escribe nada sobre el convertido (su línea de 2 ×
+  // 8000 y subtotal 16000 quedan intactos); el reorder re-resuelve el
+  // carrito activo actual (nuevo, vacío) y carga allí las 3 unidades.
+  const cart = await activeCartWithLine(2);
+  const order = await seedHistoricalOrder('converted', 3);
+  let landedCartId: string | null = null;
+
+  const other = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
+  try {
+    const controller = other.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
+      await new Promise((r) => setTimeout(r, 400));
+      // Exactamente lo que el checkout canónico escribe al convertir.
+      await tx.cart.update({
+        where: { id: cart.id },
+        data: { status: 'convertido', sessionId: null },
+      });
+    });
+
+    await new Promise((r) => setTimeout(r, 150)); // el reorder llega al lock
+    const result = await reorderOrderItems({
+      orderId: order.id,
+      viewer: viewer(),
+      mode: 'add',
+      allowPartial: true,
+    });
+    landedCartId = result.cart!.id;
+
+    // El reorder aterrizó en un carrito NUEVO del visor (no en el convertido)
+    expect(result.cart).toBeDefined();
+    expect(result.cart!.id).not.toBe(cart.id);
+
+    // Carrito NUEVO: solo las 3 unidades del pedido al precio ACTUAL (8000).
+    const newLines = await db.cartItem.findMany({ where: { cartId: result.cart!.id } });
+    expect(newLines).toHaveLength(1);
+    expect(newLines[0].productId).toBe(productId);
+    expect(newLines[0].quantity).toBe(3);
+    expect(newLines[0].unitPrice).toBe(8000);
+    expect(result.cart!.subtotal).toBe(3 * 8000);
+
+    // El carrito CONVERTIDO queda EXACTAMENTE intacto.
+    const converted = await db.cart.findUnique({ where: { id: cart.id }, include: { items: true } });
+    expect(converted!.status).toBe('convertido');
+    expect(converted!.items).toHaveLength(1);
+    expect(converted!.items[0].productId).toBe(productId);
+    expect(converted!.items[0].quantity).toBe(2);
+    expect(converted!.items[0].unitPrice).toBe(8000);
+    expect(converted!.subtotal).toBe(16000);
+  } finally {
+    await other.$disconnect();
+    const cartIdsToExpire = [cart.id, landedCartId].filter((id): id is string => Boolean(id));
+    await db.cart.updateMany({
+      where: { id: { in: cartIdsToExpire } },
+      data: { status: 'expirado' },
+    });
   }
 }, 30000);

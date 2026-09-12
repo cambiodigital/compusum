@@ -164,8 +164,18 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
   const updated = await db.$transaction(async (tx) => {
     // a) Lock pesimista de la fila del pedido: serializa la edición con
     //    cambios de estado concurrentes (p.ej. webhook solicitado→compartido).
-    const locked = await tx.$queryRaw<{ id: string; status: string }[]>`
-      SELECT id, status FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
+    //    Se leen TODAS las columnas relevantes para re-autorizar y decidir
+    //    contra el estado POST-lock, nunca contra la lectura previa.
+    const locked = await tx.$queryRaw<{
+      id: string;
+      status: string;
+      customerId: string | null;
+      sessionId: string | null;
+      requestType: string;
+      customerName: string | null;
+    }[]>`
+      SELECT id, status, "customerId", "sessionId", "requestType", "customerName"
+      FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
     // Eliminado concurrentemente entre la lectura inicial y el lock.
     if (!locked || locked.length === 0) {
@@ -182,6 +192,22 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
       );
     }
 
+    // b.2) Re-autorización contra el ownership POST-lock (p.ej. transferencia
+    //      guest→CUSTOMER mientras se esperaba el lock): la sesión invitada
+    //      perdió la propiedad y la edición aborta con 403 y CERO writes.
+    authorizeOrderAccess(
+      { customerId: locked[0].customerId, sessionId: locked[0].sessionId },
+      viewer
+    );
+
+    // b.3) Re-lectura de las líneas BAJO el lock: otro escritor (p.ej. un
+    //      admin u otro canal) pudo cambiarlas entre la lectura inicial y la
+    //      adquisición del lock; toda decisión usa este estado fresco.
+    const lockedItems = await tx.orderItem.findMany({ where: { orderId } });
+
+    // El nombre vacío conserva el nombre registrado en el estado POST-lock.
+    if (name !== undefined) updateData.customerName = name || locked[0].customerName;
+
     // c) cityId válido contra el maestro de ciudades (evita el P2003 tarde,
     //    cuando las líneas ya habrían sido reescritas).
     if (cityIdUpdate !== undefined && cityIdUpdate !== null) {
@@ -195,12 +221,13 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
 
     // d/f) Líneas: reemplazo completo re-validado (precios/stock actuales).
     if (bodyHasItems && mappedItems) {
-      // El requestType efectivo: el explícito del body o el del pedido. Cambiar
-      // pedido<->cotizacion es permitido si el body lo pide explícitamente.
+      // El requestType efectivo: el explícito del body o el del pedido
+      // POST-lock. Cambiar pedido<->cotizacion es permitido si el body lo
+      // pide explícitamente.
       const requestType = isValidRequestType(body.requestType)
         ? body.requestType
-        : isValidRequestType(order.requestType)
-        ? order.requestType
+        : isValidRequestType(locked[0].requestType)
+        ? locked[0].requestType
         : "pedido";
 
       // Motor único: contexto del VISOR cliente (invitado => precio base).
@@ -242,13 +269,14 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
       updateData.requestType = requestType;
     } else if (isValidRequestType(body.requestType)) {
       // e) Promoción de tipo sin items nuevos en el body.
-      if (body.requestType === "pedido" && order.requestType !== "pedido") {
-        // cotizacion -> pedido: TODAS las líneas existentes deben tener precio
-        // válido (> 0); si alguna falla la re-validación (precio, stock,
-        // inactivo), la conversión se rechaza y el pedido permanece como
-        // cotización (sin writes). Al convertir, las líneas se REESCRIBEN con
-        // los snapshots re-validados: un pedido nunca conserva líneas con
-        // unitPrice null (webhook, /mine y detalle leen el snapshot).
+      if (body.requestType === "pedido" && locked[0].requestType !== "pedido") {
+        // cotizacion -> pedido: TODAS las líneas existentes (re-leídas bajo el
+        // lock, nunca el snapshot previo) deben tener precio válido (> 0); si
+        // alguna falla la re-validación (precio, stock, inactivo), la
+        // conversión se rechaza y el pedido permanece como cotización (sin
+        // writes). Al convertir, las líneas se REESCRIBEN con los snapshots
+        // re-validados: un pedido nunca conserva líneas con unitPrice null
+        // (webhook, /mine y detalle leen el snapshot).
         const pricingCustomerId = await resolveServerPricingCustomer(
           sessionUser,
           null,
@@ -258,7 +286,7 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
         let revalidated;
         try {
           revalidated = await validateAndPriceItems(
-            order.items.map((item) => ({
+            lockedItems.map((item) => ({
               productId: item.productId,
               variantId: item.variantId,
               quantity: item.quantity,

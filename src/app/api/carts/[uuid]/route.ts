@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
-import { validateAndPriceItems, CartValidationError } from "@/lib/cart-validation";
+import { CartValidationError } from "@/lib/cart-validation";
+import { CartMutationError } from "@/lib/order-cart-upsert";
+import { updateCartByUuid } from "@/lib/cart-mutations";
 import {
   authorizeCartViewer,
   buildSharedCartDTO,
@@ -80,7 +82,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
     const { uuid } = await params;
     const body = await request.json();
-    const { items, customerName, customerEmail, customerPhone, customerCompany, cityId, notes } = body;
+    const { items } = body;
 
     // Validación de forma: `items` debe ser arreglo o no venir. Un arreglo
     // VACÍO es semánticamente "vaciar el carrito" (elimina items y subtotal 0).
@@ -123,87 +125,14 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Motor único de precios: el precio NUNCA se toma del navegador. Se
-    // recalcula server-side con el contexto del dueño del carrito (dato del
-    // servidor, no del cliente); si es un carrito de invitado, precio base.
-    //
-    // Semántica de `items`:
-    //   - undefined/null  => actualización SOLO de metadata: se conservan los
-    //     items Y el subtotal existente (no repreciar, no tocar líneas).
-    //   - []              => VACIAR el carrito: elimina TODOS los items y
-    //     subtotal 0.
-    //   - [...]           => validar y repreciar server-side; reemplazar
-    //     items y subtotal con el resultado validado.
-    // El subtotal SOLO se escribe cuando `items` viene en el body: un PUT de
-    // solo notas nunca puede dejar líneas con subtotal 0.
-    const itemsProvided = Array.isArray(items);
-    let validatedResult: Awaited<ReturnType<typeof validateAndPriceItems>> | undefined;
-    if (itemsProvided && items.length > 0) {
-      let ownerPricingCustomerId: string | null = null;
-      if (existingCart.userId) {
-        const owner = await db.user.findUnique({
-          where: { id: existingCart.userId },
-          select: { id: true, role: true },
-        });
-        if (owner && owner.role.toLowerCase() === "customer") {
-          ownerPricingCustomerId = owner.id;
-        }
-      }
-
-      try {
-        validatedResult = await validateAndPriceItems(
-          items.map((item: { productId: string; variantId?: string | null; quantity: number }) => ({
-            productId: item.productId,
-            variantId: item.variantId ?? null,
-            quantity: item.quantity,
-          })),
-          db,
-          {
-            customerId: ownerPricingCustomerId,
-            // Fase 3: el carrito (borrador) SÍ puede contener productos que
-            // requieren cotización (unitPrice null).
-            requestType: "cotizacion",
-          }
-        );
-      } catch (err) {
-        if (err instanceof CartValidationError) {
-          return NextResponse.json(
-            { success: false, error: err.message },
-            { status: 400 }
-          );
-        }
-        throw err;
-      }
-    }
-
-    const cart = await db.cart.update({
-      where: { uuid },
-      data: {
-        customerName,
-        customerEmail,
-        customerPhone,
-        customerCompany,
-        cityId: cityId || null,
-        notes,
-        subtotal: itemsProvided ? (validatedResult?.subtotal ?? 0) : existingCart.subtotal,
-        ...(itemsProvided
-          ? {
-              items: {
-                deleteMany: {},
-                create:
-                  validatedResult?.validatedItems.map((item) => ({
-                    productId: item.productId,
-                    variantId: item.variantId,
-                    variantName: item.variantName,
-                    variantCode: item.variantCode,
-                    quantity: item.quantity,
-                    unitPrice: item.unitPrice,
-                  })) ?? [],
-              },
-            }
-          : {}),
-      },
-      include: { items: true },
+    // Semántica de `items` (metadata-only / vaciar / reemplazar) vive en el
+    // servicio: una única tx con lock autoritativo del carrito re-valida
+    // estado y ownership POST-lock antes de escribir, y reprecia server-side
+    // con el contexto del DUEÑO del carrito (nunca datos del navegador).
+    const cart = await updateCartByUuid({
+      uuid,
+      viewer: { sessionId, userId, userRole },
+      body,
     });
 
     return NextResponse.json({
@@ -212,6 +141,18 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       message: "Carrito actualizado",
     });
   } catch (error) {
+    if (error instanceof CartValidationError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: 400 }
+      );
+    }
+    if (error instanceof CartMutationError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: error.status }
+      );
+    }
     console.error("Error updating cart:", error);
     return NextResponse.json(
       { success: false, error: "Error al actualizar el carrito" },

@@ -83,10 +83,14 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
         state.inTx = false;
       }
     }),
-    // Lock pesimista del carrito (SELECT ... FOR UPDATE)
+    // Lock pesimista del carrito (SELECT ... FOR UPDATE): la fila bloqueada
+    // es un carrito ACTIVO propiedad del visor (cust-A) — lockCartForMutation
+    // re-valida status/ownership contra este snapshot.
     $queryRaw: vi.fn().mockImplementation(() => {
       ops.push({ op: 'lock', inTx: state.inTx });
-      return Promise.resolve([]);
+      return Promise.resolve([
+        { id: 'cart-1', status: 'activo', isActive: true, sessionId: null, userId: 'cust-A' },
+      ]);
     }),
     order: {
       findUnique: vi.fn().mockResolvedValue(opts.order ?? null),

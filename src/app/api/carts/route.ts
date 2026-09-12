@@ -1,24 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { Prisma } from "@prisma/client";
-import { upsertCart, upsertActiveCart } from "@/lib/order-cart-upsert";
 import { getCurrentUser } from "@/lib/auth";
-import { validateAndPriceItems, CartValidationError } from "@/lib/cart-validation";
-import { attachResolvedPricesToCartItems, resolveServerPricingCustomer } from "@/lib/pricing";
+import { CartValidationError } from "@/lib/cart-validation";
+import { CartMutationError } from "@/lib/order-cart-upsert";
+import { saveCartChanges, clearActiveCarts } from "@/lib/cart-mutations";
+import { attachResolvedPricesToCartItems } from "@/lib/pricing";
 import { getSessionPricingContext } from "@/lib/pricing-context";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { 
-      items, 
-      customerName, 
-      customerEmail, 
-      customerPhone, 
-      customerCompany, 
-      cityId, 
+    const {
+      items,
+      customerName,
+      customerEmail,
+      customerPhone,
+      customerCompany,
+      cityId,
       notes,
-      action = "save" // "save" | "add" | "update" | "remove"
+      action = "save" // "save" | "add" | "update" | "clear" | "remove"
     } = body;
 
     // Obtener sessionId del header (viene del middleware)
@@ -27,199 +28,56 @@ export async function POST(request: NextRequest) {
     // Resolver userId si el visitante tiene sesión activa
     const currentUser = await getCurrentUser();
     const userId = currentUser?.id ?? null;
+    const userRole = currentUser?.role ?? null;
+    // Mismo quirk de caso que GET/PUT: 'admin' minúscula o 'AGENT' mayúscula.
+    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
 
-    let validatedResult;
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      if (action === "save" || action === "clear") {
-        let cart = await upsertActiveCart(sessionId, userId, cityId);
-        await db.cartItem.deleteMany({
-          where: { cartId: cart.id },
-        });
-        cart = await db.cart.update({
-          where: { id: cart.id },
-          data: {
-            subtotal: 0,
-            updatedAt: new Date(),
-          },
-          include: { items: true },
-        });
-        return NextResponse.json({
-          success: true,
-          data: {
-            id: cart.id,
-            uuid: cart.uuid,
-            itemCount: 0,
-            subtotal: 0,
-          },
-          message: "Carrito vaciado exitosamente",
-        });
-      }
-      return NextResponse.json(
-        { success: false, error: "El carrito debe tener al menos un producto." },
-        { status: 400 }
-      );
-    }
-
-    // Motor único de precios: el contexto del cliente SOLO procede de la
-    // sesión autenticada (o de ADMIN/AGENT resolviendo el contacto server-side).
-    // Un invitado que escriba el email/teléfono de otro cliente recibe
-    // exclusivamente el precio base/default autorizado para invitados.
-    const pricingCustomerId = await resolveServerPricingCustomer(currentUser, {
-      phone: customerPhone,
-      email: customerEmail,
+    // La lógica vive en el servicio: única disciplina de mutación (tx + lock
+    // + re-lectura autoritativa del carrito antes de escribir).
+    const result = await saveCartChanges({
+      viewer: { sessionId, userId, isAdminOrAgent },
+      action,
+      items,
+      cityId,
+      customerName,
+      customerEmail,
+      customerPhone,
+      customerCompany,
+      notes,
+      currentUser,
     });
 
-    try {
-      validatedResult = await validateAndPriceItems(items, db, {
-        customerId: pricingCustomerId,
-        // Fase 3: el carrito (borrador) SÍ puede contener productos que
-        // requieren cotización (unitPrice null). La decisión pedido vs
-        // cotización se toma al confirmar el checkout.
-        requestType: "cotizacion",
-      });
-    } catch (err) {
-      if (err instanceof CartValidationError) {
-        return NextResponse.json(
-          { success: false, error: err.message },
-          { status: 400 }
-        );
-      }
-      throw err;
-    }
-
-    const { validatedItems } = validatedResult;
-
-    // Obtener o crear carrito activo
-    let cart = await upsertActiveCart(sessionId, userId, cityId);
-
-    // Eliminar items anteriores (para una limpieza completa) o actualizar según action
-    if (action === "save") {
-      // Reemplazar todos los items
-      await db.cartItem.deleteMany({
-        where: { cartId: cart.id },
-      });
-
-      // Deduplicar por (productId, variantId) para evitar violaciones de índice único
-      const itemMap = new Map<string, typeof validatedItems[number]>();
-      for (const item of validatedItems) {
-        const key = `${item.productId}::${item.variantId ?? "base"}`;
-        itemMap.set(key, item);
-      }
-      const deduplicatedItems = Array.from(itemMap.values());
-
-      // Crear nuevos items con datos y precios validados en servidor
-      await db.cartItem.createMany({
-        data: deduplicatedItems.map((item) => ({
-          cartId: cart.id,
-          productId: item.productId,
-          variantId: item.variantId,
-          variantName: item.variantName,
-          variantCode: item.variantCode,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-        })),
-      });
-    } else if (action === "add") {
-      // Agregar items (sin eliminar anteriores)
-      const itemsToAdd = validatedItems.filter((newItem) => {
-        const exists = cart.items?.some(
-          (existing) =>
-            existing.productId === newItem.productId &&
-            (existing.variantId ?? null) === (newItem.variantId ?? null)
-        );
-        return !exists;
-      });
-
-      if (itemsToAdd.length > 0) {
-        await db.cartItem.createMany({
-          data: itemsToAdd.map((item) => ({
-            cartId: cart.id,
-            productId: item.productId,
-            variantId: item.variantId,
-            variantName: item.variantName,
-            variantCode: item.variantCode,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-          })),
-        });
-      }
-
-      // Actualizar cantidades y precios validados de items existentes
-      for (const item of validatedItems) {
-        const existing = cart.items?.find(
-          (ci) =>
-            ci.productId === item.productId &&
-            (ci.variantId ?? null) === (item.variantId ?? null)
-        );
-        if (existing) {
-          await db.cartItem.update({
-            where: { id: existing.id },
-            data: {
-              quantity: item.quantity,
-              unitPrice: item.unitPrice,
-              variantName: item.variantName,
-              variantCode: item.variantCode,
-            },
-          });
-        }
-      }
-    } else if (action === "update") {
-      // Actualizar items específicos sin eliminar
-      for (const item of validatedItems) {
-        const existing = cart.items?.find(
-          (ci) =>
-            ci.productId === item.productId &&
-            (ci.variantId ?? null) === (item.variantId ?? null)
-        );
-        if (existing) {
-          await db.cartItem.update({
-            where: { id: existing.id },
-            data: {
-              quantity: item.quantity,
-              unitPrice: item.unitPrice,
-              variantName: item.variantName,
-              variantCode: item.variantCode,
-            },
-          });
-        }
-      }
-    }
-
-    // Recalcular el subtotal total del carrito directamente desde los ítems en base de datos
-    const allCartItems = await db.cartItem.findMany({
-      where: { cartId: cart.id },
-    });
-    const subtotal = allCartItems.reduce(
-      (sum, item) => sum + (item.unitPrice || 0) * item.quantity,
-      0
-    );
-
-    // Actualizar datos del carrito
-    cart = await db.cart.update({
-      where: { id: cart.id },
-      data: {
-        customerName: customerName || undefined,
-        customerEmail: customerEmail || undefined,
-        customerPhone: customerPhone || undefined,
-        customerCompany: customerCompany || undefined,
-        notes: notes || undefined,
-        subtotal,
-        updatedAt: new Date(),
-      },
-      include: { items: true },
-    });
+    // El mensaje "vaciado" corresponde EXACTAMENTE a la rama de vaciado del
+    // servicio (items ausentes/vacíos con action save|clear): un action
+    // 'clear' CON items recorre el tail normal de metadata+subtotal y
+    // responde "Carrito actualizado exitosamente".
+    const isEmptyClear = !items || !Array.isArray(items) || items.length === 0;
 
     return NextResponse.json({
       success: true,
-      data: { 
-        id: cart.id, 
-        uuid: cart.uuid,
-        itemCount: cart.items.length,
-        subtotal: cart.subtotal,
+      data: {
+        id: result.id,
+        uuid: result.uuid,
+        itemCount: result.itemCount,
+        subtotal: result.subtotal,
       },
-      message: "Carrito actualizado exitosamente",
+      message: isEmptyClear
+        ? "Carrito vaciado exitosamente"
+        : "Carrito actualizado exitosamente",
     });
   } catch (error) {
+    if (error instanceof CartValidationError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: 400 }
+      );
+    }
+    if (error instanceof CartMutationError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: error.status }
+      );
+    }
     console.error("Error managing cart:", error);
     return NextResponse.json(
       { success: false, error: "Error al guardar el carrito" },
@@ -322,37 +180,29 @@ export async function DELETE(request: NextRequest) {
     const sessionId = request.headers.get("x-session-id");
     const currentUser = await getCurrentUser();
     const userId = currentUser?.id ?? null;
+    const userRole = currentUser?.role ?? null;
+    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
 
+    // Semántica HEAD exacta: SOLO el caso sin sesión ni cuenta responde
+    // "Sin carrito activo para vaciar"; con sesión/cuenta la respuesta es
+    // "Carrito vaciado exitosamente" haya o no carrito activo que vaciar.
     if (!sessionId && !userId) {
       return NextResponse.json({ success: true, message: "Sin carrito activo para vaciar" });
     }
 
-    const orConditions: Array<{ sessionId?: string | null; userId?: string; status: string }> = [];
-    if (sessionId) orConditions.push({ sessionId, status: "activo" });
-    if (userId) orConditions.push({ userId, status: "activo" });
-
-    const cart = await db.cart.findFirst({
-      where: { OR: orConditions },
-    });
-
-    if (cart) {
-      await db.cartItem.deleteMany({
-        where: { cartId: cart.id },
-      });
-      await db.cart.update({
-        where: { id: cart.id },
-        data: {
-          subtotal: 0,
-          updatedAt: new Date(),
-        },
-      });
-    }
+    await clearActiveCarts({ sessionId, userId, isAdminOrAgent });
 
     return NextResponse.json({
       success: true,
       message: "Carrito vaciado exitosamente",
     });
   } catch (error) {
+    if (error instanceof CartMutationError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: error.status }
+      );
+    }
     console.error("Error clearing cart:", error);
     return NextResponse.json(
       { success: false, error: "Error al vaciar el carrito" },

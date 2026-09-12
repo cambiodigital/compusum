@@ -7,6 +7,7 @@
  * `src/lib/order-create.ts` para la semántica y la protección de doble submit.
  */
 
+import { Prisma } from '@prisma/client';
 import { db } from './db';
 
 /**
@@ -286,5 +287,110 @@ export async function transferSessionOrderToUser(
   }
 
   return orders.length === 1 ? orders[0] : orders;
+}
+
+// =====================
+// DISCIPLINA ÚNICA DE MUTACIÓN DE CARRITO
+// =====================
+
+/**
+ * Errores controlados de la disciplina de mutación: la ruta/service decide
+ * el status HTTP a partir de `code`/`status` sin inspeccionar la BD.
+ */
+export class CartMutationError extends Error {
+  status: number;
+  code:
+    | 'CART_NOT_FOUND'
+    | 'CART_NOT_ACTIVE'
+    | 'CART_FORBIDDEN'
+    | 'CART_HAS_ORDERS';
+
+  constructor(
+    code:
+      | 'CART_NOT_FOUND'
+      | 'CART_NOT_ACTIVE'
+      | 'CART_FORBIDDEN'
+      | 'CART_HAS_ORDERS',
+    message: string,
+    status: number
+  ) {
+    super(message);
+    this.name = 'CartMutationError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+/** Identidad del actor que intenta mutar el carrito (precomputada por el llamador). */
+export interface CartMutationViewer {
+  sessionId: string | null;
+  userId: string | null;
+  isAdminOrAgent: boolean;
+}
+
+/** Estado autoritativo del carrito leído BAJO el lock. */
+export type LockedCartSnapshot = {
+  id: string;
+  status: string;
+  isActive: boolean;
+  sessionId: string | null;
+  userId: string | null;
+};
+
+/**
+ * ÚNICA disciplina de mutación de carrito: dentro de una transacción, toma
+ * `SELECT ... FOR UPDATE` sobre la fila del Cart, re-lee el estado
+ * autoritativo bajo el lock y re-valida status/ownership ANTES de escribir
+ * líneas, subtotal o metadata. Toda mutación de carrito (checkout, edición,
+ * reorder, guardado desde el sitio) debe pasar por aquí: la lectura previa
+ * al lock es solo un fast-fail, nunca la base de una escritura.
+ *
+ * - CART_NOT_FOUND (404): el carrito desapareció entre la lectura externa y
+ *   el lock (delete concurrente).
+ * - CART_NOT_ACTIVE (409): el carrito fue convertido/compartido/expirado
+ *   mientras se esperaba el lock; la tx aborta SIN writes.
+ * - CART_FORBIDDEN (403): el actor no es admin/agent ni dueño (por
+ *   sessionId o userId) del estado POST-lock: cubre la transferencia
+ *   invitado→cuenta ocurrida durante la espera del lock.
+ */
+export async function lockCartForMutation(
+  tx: Prisma.TransactionClient,
+  cartId: string,
+  viewer: CartMutationViewer
+): Promise<LockedCartSnapshot> {
+  const locked = await tx.$queryRaw<LockedCartSnapshot[]>`
+    SELECT id, status, "isActive", "sessionId", "userId"
+    FROM "Cart" WHERE id = ${cartId} FOR UPDATE`;
+
+  if (!locked || locked.length === 0) {
+    throw new CartMutationError('CART_NOT_FOUND', 'Carrito no encontrado', 404);
+  }
+
+  const cart = locked[0];
+  if (cart.status !== 'activo' || !cart.isActive) {
+    throw new CartMutationError(
+      'CART_NOT_ACTIVE',
+      'Este carrito ya fue procesado o ya no se puede modificar',
+      409
+    );
+  }
+
+  const isOwner =
+    (cart.sessionId !== null && cart.sessionId === viewer.sessionId) ||
+    (cart.userId !== null && viewer.userId !== null && cart.userId === viewer.userId) ||
+    (cart.sessionId === null &&
+      cart.userId === null &&
+      viewer.sessionId === null &&
+      viewer.userId === null);
+
+  if (!viewer.isAdminOrAgent && !isOwner) {
+    throw new CartMutationError(
+      'CART_FORBIDDEN',
+      'No tienes permiso para modificar este carrito',
+      403
+    );
+  }
+
+  return cart;
 }
 

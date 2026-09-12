@@ -77,8 +77,33 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
 
   const db = {
     $transaction: vi.fn(async (fn: any) => fn(db)),
-    // Lock pesimista: SELECT ... FOR UPDATE (Order en edición, Cart en reorder)
-    $queryRaw: vi.fn().mockResolvedValue([{ id: 'order-1', status: 'solicitado' }]),
+    // Lock pesimista con revalidación autoritativa: la fila devuelta depende
+    // de la tabla bloqueada (Order en edición, Cart en reorder) y debe ser
+    // coherente con el fixture (dueño cust-A, editable/activo según aplique).
+    $queryRaw: vi.fn().mockImplementation((sql: unknown) => {
+      const query = String(sql);
+      if (query.includes('FROM "Order"')) {
+        return Promise.resolve([
+          {
+            id: 'order-1',
+            status: 'solicitado',
+            customerId: opts.order?.customerId ?? 'cust-A',
+            sessionId: null,
+            requestType: opts.order?.requestType ?? 'pedido',
+            customerName: 'Cliente',
+          },
+        ]);
+      }
+      return Promise.resolve([
+        {
+          id: opts.cart?.id ?? 'cart-1',
+          status: 'activo',
+          isActive: true,
+          sessionId: null,
+          userId: opts.cart?.userId ?? 'cust-A',
+        },
+      ]);
+    }),
     city: {
       findUnique: vi.fn().mockResolvedValue({ id: 'city-1', name: 'Bogotá' }),
     },
@@ -95,6 +120,10 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
       }),
     },
     orderItem: {
+      // Re-lectura de líneas BAJO el lock (estado fresco para re-validar).
+      findMany: vi.fn().mockImplementation(() =>
+        Promise.resolve(opts.order?.items ?? [])
+      ),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
@@ -187,35 +216,43 @@ describe('reorderOrderItems: el pedido origen queda intacto', () => {
   it('perfil A ≠ perfil B: el precio del carrito depende del visor', async () => {
     const orderA = makeOrder(); // customerId cust-A
     const orderB = makeOrder({ id: 'order-B', customerId: 'cust-B' }); // su propio pedido
-    const cart = { id: 'cart-1', uuid: 'uuid-1', sessionId: null, userId: 'cust-A', status: 'activo' };
-    const db = makeDb({
+
+    // Fixture propio por visor: cada CUSTOMER resuelve SU carrito (el lock
+    // revalida ownership contra el dueño real del carrito).
+    const cartB = { id: 'cart-B', uuid: 'uuid-b', sessionId: null, userId: 'cust-B', status: 'activo' };
+    const dbB = makeDb({
+      order: orderB,
+      cart: cartB,
+      users: {
+        'cust-B': { isActive: true, role: 'CUSTOMER', priceProfile: null },
+      },
+    });
+    Object.assign(mockDb, dbB);
+    mockDb.$transaction.mockImplementation(async (fn: any) => fn(dbB));
+
+    // Visor B (sin perfil) repite SU pedido => precio base 10000
+    await reorderOrderItems({ orderId: 'order-B', viewer: viewerB });
+    expect(dbB.writes.createdCartItems.at(-1).unitPrice).toBe(10000);
+
+    // Visor A (perfil +20%) repite el suyo => 12000
+    const cartA = { id: 'cart-A', uuid: 'uuid-a', sessionId: null, userId: 'cust-A', status: 'activo' };
+    const dbA = makeDb({
       order: orderA,
-      cart,
+      cart: cartA,
       users: {
         'cust-A': {
           isActive: true,
           role: 'CUSTOMER',
           priceProfile: { id: 'prof-A', code: 'PROF-A', percentAdjustment: 20, isActive: true },
         },
-        'cust-B': { isActive: true, role: 'CUSTOMER', priceProfile: null },
       },
     });
-    Object.assign(mockDb, db);
-    mockDb.$transaction.mockImplementation(async (fn: any) => fn(db));
-    (db.order.findUnique as any).mockImplementation(({ where }: any) =>
-      Promise.resolve(
-        where.id === 'order-1' ? orderA : where.id === 'order-B' ? orderB : null
-      )
-    );
+    Object.assign(mockDb, dbA);
+    mockDb.$transaction.mockImplementation(async (fn: any) => fn(dbA));
 
-    // Visor B (sin perfil) repite SU pedido => precio base 10000
-    await reorderOrderItems({ orderId: 'order-B', viewer: viewerB });
-    expect(db.writes.createdCartItems.at(-1).unitPrice).toBe(10000);
-
-    // Visor A (perfil +20%) repite el suyo => 12000
     const resultA = await reorderOrderItems({ orderId: 'order-1', viewer: viewerA });
     expect(resultA.items[0].currentUnitPrice).toBe(12000);
-    expect(db.writes.createdCartItems.at(-1).unitPrice).toBe(12000);
+    expect(dbA.writes.createdCartItems.at(-1).unitPrice).toBe(12000);
   });
 
   it('producto eliminado no se omite en silencio: reporta product_removed y NO escribe', async () => {

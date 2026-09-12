@@ -86,7 +86,18 @@ function makeDb(opts: { order?: any; product?: any; city?: any } = {}) {
         state.inTx = false;
       }
     }),
-    $queryRaw: vi.fn().mockResolvedValue([{ id: 'order-1', status: 'solicitado' }]),
+    // Lock pesimista: fila POST-lock con las columnas que la edición
+    // re-autoriza y decide (customerId/sessionId/requestType/customerName).
+    $queryRaw: vi.fn().mockResolvedValue([
+      {
+        id: 'order-1',
+        status: 'solicitado',
+        customerId: 'cust-A',
+        sessionId: null,
+        requestType: opts.order?.requestType ?? 'pedido',
+        customerName: 'Cliente A',
+      },
+    ]),
     city: {
       findUnique: vi.fn().mockResolvedValue(opts.city ?? { id: 'city-1', name: 'Bogotá' }),
     },
@@ -102,6 +113,10 @@ function makeDb(opts: { order?: any; product?: any; city?: any } = {}) {
       }),
     },
     orderItem: {
+      // Re-lectura de líneas BAJO el lock (estado fresco para re-validar).
+      findMany: vi.fn().mockImplementation(() =>
+        Promise.resolve(opts.order?.items ?? [])
+      ),
       deleteMany: vi.fn().mockImplementation(() => {
         ops.push({ op: 'orderItem.deleteMany', inTx: state.inTx });
         return Promise.resolve({ count: 1 });
