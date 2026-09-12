@@ -4,6 +4,7 @@ import {
   loadProfileOverrides,
   resolvePricesFromProductMap,
 } from "./pricing";
+import type { RequestType } from "./order-status";
 
 export class CartValidationError extends Error {
   constructor(message: string) {
@@ -26,13 +27,18 @@ export interface ValidatedCartItem {
   variantName: string | null;
   variantCode: string | null;
   quantity: number;
-  unitPrice: number;
+  /** Precio resuelto server-side. null SOLO en modo cotización (requiere cotización). */
+  unitPrice: number | null;
   lineTotal: number;
+  requiresQuote: boolean;
 }
 
 export interface ValidationResult {
   validatedItems: ValidatedCartItem[];
+  /** Suma de líneas con precio conocido. Las líneas por cotizar aportan 0. */
   subtotal: number;
+  /** true si al menos una línea quedó sin precio (requiere cotización). */
+  hasQuoteItems: boolean;
 }
 
 export interface ValidateAndPriceOptions {
@@ -43,6 +49,14 @@ export interface ValidateAndPriceOptions {
    * Invitado => null => precio base/default autorizado para invitados.
    */
   customerId?: string | null;
+  /**
+   * 'pedido' (default): toda línea exige precio resuelto > 0; una línea que
+   * requiere cotización rechaza la operación completa.
+   * 'cotizacion': las líneas sin precio se aceptan con unitPrice null
+   * (se persisten como pendientes de cotización); producto, variante,
+   * cantidad, mínimos e inventario se validan igual.
+   */
+  requestType?: RequestType;
 }
 
 /**
@@ -59,6 +73,8 @@ export async function validateAndPriceItems(
   tx: any = db,
   options: ValidateAndPriceOptions = {}
 ): Promise<ValidationResult> {
+  const requestType: RequestType = options.requestType ?? "pedido";
+
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new CartValidationError("El carrito debe tener al menos un producto.");
   }
@@ -105,6 +121,7 @@ export async function validateAndPriceItems(
   }
 
   const validatedItems: ValidatedCartItem[] = [];
+  let hasQuoteItems = false;
 
   for (const item of items) {
     if (!item.productId) {
@@ -193,14 +210,18 @@ export async function validateAndPriceItems(
 
     // Precio resuelto EXCLUSIVAMENTE por el motor server-side
     const resolved = resolvedPrices.get(`${product.id}::${item.variantId || ""}`);
-    const unitPrice = resolved?.unitPrice ?? 0;
+    const resolvedUnitPrice = resolved?.unitPrice ?? 0;
+    const requiresQuote = resolvedUnitPrice === null || resolvedUnitPrice <= 0;
 
-    if (unitPrice <= 0) {
+    if (requiresQuote && requestType === "pedido") {
       const displayName = variantName ? `"${product.name} (${variantName})"` : `"${product.name}"`;
       throw new CartValidationError(
         `El producto ${displayName} requiere cotización y no puede tramitarse con precio COP 0.`
       );
     }
+
+    const unitPrice = requiresQuote ? null : resolvedUnitPrice;
+    if (requiresQuote) hasQuoteItems = true;
 
     validatedItems.push({
       productId: product.id,
@@ -211,7 +232,8 @@ export async function validateAndPriceItems(
       variantCode,
       quantity: item.quantity,
       unitPrice,
-      lineTotal: unitPrice * item.quantity,
+      lineTotal: (unitPrice ?? 0) * item.quantity,
+      requiresQuote,
     });
   }
 
@@ -220,5 +242,6 @@ export async function validateAndPriceItems(
   return {
     validatedItems,
     subtotal,
+    hasQuoteItems,
   };
 }

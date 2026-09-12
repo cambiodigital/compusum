@@ -6,7 +6,7 @@ import {
   SESSION_DURATION_HOURS_DEFAULT,
   rotateGuestSessionCookie,
 } from '@/lib/auth';
-import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
+import { transferSessionDataToUser } from '@/lib/checkout';
 import { toAuthUserDTO } from '@/lib/user-dto';
 import { checkRateLimit, recordFailedAttempt, resetRateLimit, getClientIp } from '@/lib/rate-limit';
 
@@ -71,14 +71,28 @@ export async function POST(req: NextRequest) {
     };
 
     const completeLogin = async (result: { token: string; user: any }) => {
-      await setSessionCookie(result.token, sessionHours * 60 * 60);
-
+      // Handoff PRIMERO: si la transferencia guest→cuenta falla, NO se publica
+      // la cookie de sesión, NO se rota la guest y NO se resetean los límites
+      // de rate. Publicar sesión sin handoff dejaría al usuario autenticado
+      // con sus datos guest invisibles bajo la cuenta (identidad userId
+      // primero); la sesión guest conserva acceso y puede reintentar.
       if (sessionId && result.user?.id) {
-        await Promise.all([
-          transferSessionCartToUser(sessionId, result.user.id),
-          transferSessionOrderToUser(sessionId, result.user.id),
-        ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
+        try {
+          await transferSessionDataToUser(sessionId, result.user.id);
+        } catch (e) {
+          console.error('Error transfiriendo sesión al usuario:', e);
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                'No fue posible completar el inicio de sesión. Tus datos como invitado permanecen intactos; intenta de nuevo.',
+            },
+            { status: 500 }
+          );
+        }
       }
+
+      await setSessionCookie(result.token, sessionHours * 60 * 60);
       await rotateGuestSessionCookie();
 
       await resetRateLimit(ipKey);

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifyPassword, createSession, setSessionCookie, rotateGuestSessionCookie, isAdminRole } from '@/lib/auth';
-import { transferSessionCartToUser, transferSessionOrderToUser } from '@/lib/order-cart-upsert';
+import { transferSessionDataToUser } from '@/lib/checkout';
 import {
   getClientIp,
   checkRateLimit,
@@ -111,24 +111,38 @@ export async function POST(request: Request) {
       );
     }
 
-    // Reseteo de contadores tras autenticación exitosa
+    // Crear sesión (token en memoria; la cookie se publica SOLO tras el
+    // handoff exitoso de abajo)
+    const token = await createSession(user.id);
+
+    // Handoff PRIMERO: si la transferencia guest→cuenta falla, NO se publica
+    // la cookie de sesión, NO se rota la guest y NO se resetean los límites
+    // de rate. Publicar sesión sin handoff dejaría al usuario autenticado con
+    // sus datos guest invisibles bajo la cuenta (identidad userId primero).
+    const sessionId = request.headers.get('x-session-id');
+    if (sessionId && user.id) {
+      try {
+        await transferSessionDataToUser(sessionId, user.id);
+      } catch (e) {
+        console.error('Error transfiriendo sesión al usuario:', e);
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              'No fue posible completar el inicio de sesión. Tus datos como invitado permanecen intactos; intenta de nuevo.',
+          },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Reseteo de contadores tras autenticación Y handoff exitosos
     await Promise.all([
       resetRateLimit(ipKey),
       resetRateLimit(emailKey),
     ]);
 
-    // Crear sesión
-    const token = await createSession(user.id);
     await setSessionCookie(token);
-
-    // Transferir carrito y pedidos de la sesión de invitado al usuario
-    const sessionId = request.headers.get('x-session-id');
-    if (sessionId) {
-      await Promise.all([
-        transferSessionCartToUser(sessionId, user.id),
-        transferSessionOrderToUser(sessionId, user.id),
-      ]).catch((e) => console.error('Error transfiriendo sesión al usuario:', e));
-    }
     await rotateGuestSessionCookie();
 
     // Actualizar último login

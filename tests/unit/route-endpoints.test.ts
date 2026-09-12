@@ -22,6 +22,11 @@ const mockDb = vi.hoisted(() => {
     user: {
       findUnique: vi.fn().mockResolvedValue(null),
     },
+    // La mutación del carrito ahora corre dentro de la disciplina única
+    // (tx + FOR UPDATE): el mock ejecuta la callback con el propio mockDb y
+    // simula la lectura bloqueada de un carrito activo de guest-session-1.
+    $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
     rateLimit: {
       findUnique: vi.fn().mockImplementation(async ({ where }: any) => rlRows.get(where.key) ?? null),
       upsert: vi.fn().mockImplementation(async ({ where, create, update }: any) => {
@@ -115,6 +120,18 @@ beforeEach(() => {
   mockDb.cart.update.mockImplementation(({ data }: any) =>
     Promise.resolve({ ...ACTIVE_CART, ...data, items: data.items?.create ?? [] })
   );
+  // Fila bloqueada simulada: carrito activo y propiedad de guest-session-1
+  // (el visor del PUT pasa el re-check de ownership de lockCartForMutation).
+  mockDb.$queryRaw.mockResolvedValue([
+    {
+      id: 'cart-1',
+      status: 'activo',
+      isActive: true,
+      sessionId: 'guest-session-1',
+      userId: null,
+    },
+  ]);
+  mockDb.$transaction.mockImplementation(async (fn: (tx: any) => any) => fn(mockDb));
   mockDb.__resetRateLimit();
 });
 
@@ -171,7 +188,9 @@ describe('ENDPOINT PUT /api/carts/[uuid] — vaciado con items: []', () => {
 
     const updateArg = mockDb.cart.update.mock.calls[0][0];
     expect(updateArg.data.items).toBeUndefined(); // items intactos
-    expect(updateArg.data.subtotal).toBe(15000); // subtotal PREVIO conservado
+    // El subtotal NO se escribe (ni siquiera con el valor leído antes del
+    // lock): la fila conserva el subtotal previo.
+    expect(updateArg.data.subtotal).toBeUndefined();
     expect(updateArg.data.notes).toBe('solo notas');
   });
 
@@ -181,7 +200,7 @@ describe('ENDPOINT PUT /api/carts/[uuid] — vaciado con items: []', () => {
     expect(res.status).toBe(200);
     const updateArg = mockDb.cart.update.mock.calls[0][0];
     expect(updateArg.data.items).toBeUndefined();
-    expect(updateArg.data.subtotal).toBe(15000);
+    expect(updateArg.data.subtotal).toBeUndefined(); // subtotal intacto
   });
 });
 

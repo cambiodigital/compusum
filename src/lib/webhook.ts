@@ -17,6 +17,8 @@ export interface OrderWebhookPayload {
   orderNumber: string;
   orderId: string;
   status: string;
+  /** pedido | cotizacion: enrutamiento interno de la solicitud. */
+  requestType: string;
   sentVia: string | null;
   createdAt: string;
   // Customer
@@ -25,6 +27,9 @@ export interface OrderWebhookPayload {
   customerPhone: string | null;
   customerCompany: string | null;
   notes: string | null;
+  // Asesor asignado (nombre para enrutamiento; sin datos de contacto internos)
+  agentId: string | null;
+  agentName: string | null;
   // Totals
   subtotal: number;
   // Items
@@ -50,13 +55,14 @@ export interface OrderWebhookPayload {
 
 /**
  * Build a complete webhook payload from an order ID.
- * Fetches all related data (items, city, shipping route).
+ * Fetches all related data (items, city, shipping route, assigned agent).
  */
 export async function buildWebhookPayload(orderId: string): Promise<OrderWebhookPayload | null> {
   const order = await db.order.findUnique({
     where: { id: orderId },
     include: {
       items: true,
+      agent: { select: { name: true } },
       city: {
         include: {
           department: true,
@@ -72,6 +78,7 @@ export async function buildWebhookPayload(orderId: string): Promise<OrderWebhook
     orderNumber: order.orderNumber,
     orderId: order.id,
     status: order.status,
+    requestType: order.requestType,
     sentVia: order.sentVia,
     createdAt: order.createdAt.toISOString(),
     customerName: order.customerName,
@@ -79,6 +86,8 @@ export async function buildWebhookPayload(orderId: string): Promise<OrderWebhook
     customerPhone: order.customerPhone,
     customerCompany: order.customerCompany,
     notes: order.notes,
+    agentId: order.agentId,
+    agentName: order.agent?.name ?? null,
     subtotal: order.subtotal,
     items: order.items.map((i) => ({
       productName: i.productName,

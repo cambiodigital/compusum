@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireAdminApi } from "@/lib/auth";
+import { isValidOrderStatus } from "@/lib/order-status";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -45,6 +46,17 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const order = await db.order.findUnique({ where: { id } });
     if (!order) {
       return NextResponse.json({ success: false, error: "Pedido no encontrado" }, { status: 404 });
+    }
+
+    // Fase 3: ningún PATCH puede escribir un estado arbitrario.
+    if (status !== undefined && !isValidOrderStatus(status)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Estado inválido. Valores permitidos: solicitado, compartido, recibido.`,
+        },
+        { status: 400 }
+      );
     }
 
     const updateData: Record<string, unknown> = {};

@@ -13,6 +13,7 @@ import {
   User,
   Building2,
   Calendar,
+  HeadsetIcon,
 } from "lucide-react";
 import { formatPrice } from "@/lib/format";
 
@@ -36,7 +37,10 @@ export default async function AdminPedidosPage({ searchParams }: Props) {
   const [orders, total, stats] = await Promise.all([
     db.order.findMany({
       where,
-      include: { _count: { select: { items: true } } },
+      include: {
+        _count: { select: { items: true } },
+        agent: { select: { name: true } },
+      },
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * limit,
       take: limit,
@@ -102,6 +106,12 @@ export default async function AdminPedidosPage({ searchParams }: Props) {
                           {order.orderNumber}
                         </span>
                         <OrderStatusBadge status={order.status} />
+                        {/* Fase 3: distinguir Pedido vs Cotización */}
+                        {order.requestType === "cotizacion" && (
+                          <Badge variant="outline" className="text-xs text-orange-600 border-orange-200 bg-orange-50">
+                            Cotización
+                          </Badge>
+                        )}
                         {order.webhookSent && (
                           <Badge variant="outline" className="text-xs text-purple-600 border-purple-200">
                             Webhook
@@ -117,6 +127,12 @@ export default async function AdminPedidosPage({ searchParams }: Props) {
                           <span className="flex items-center gap-1">
                             <Building2 className="h-3 w-3" />
                             {order.customerCompany}
+                          </span>
+                        )}
+                        {order.agent?.name && (
+                          <span className="flex items-center gap-1">
+                            <HeadsetIcon className="h-3 w-3" />
+                            {order.agent.name}
                           </span>
                         )}
                         <span>{order._count.items} productos</span>

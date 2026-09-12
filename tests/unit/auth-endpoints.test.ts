@@ -81,9 +81,8 @@ vi.mock('@/lib/customer-auth', () => ({
   },
 }));
 
-vi.mock('@/lib/order-cart-upsert', () => ({
-  transferSessionCartToUser: vi.fn().mockResolvedValue(undefined),
-  transferSessionOrderToUser: vi.fn().mockResolvedValue(undefined),
+vi.mock('@/lib/checkout', () => ({
+  transferSessionDataToUser: vi.fn().mockResolvedValue({ cart: null, orders: null }),
 }));
 
 import { POST as phoneRoutePOST } from '@/app/api/auth/phone/route';
@@ -91,6 +90,8 @@ import { POST as customerLoginPOST } from '@/app/api/auth/customer/login/route';
 import { POST as registerPOST } from '@/app/api/auth/register/route';
 import { loginWithPhone, loginWithPassword } from '@/lib/auth-dual';
 import { registerCustomer } from '@/lib/customer-auth';
+import { transferSessionDataToUser } from '@/lib/checkout';
+import { setSessionCookie, rotateGuestSessionCookie } from '@/lib/auth';
 
 const BODY = { phone: '+57 300 123 4567', otpCode: '1234' };
 
@@ -143,6 +144,21 @@ describe('ENDPOINT /api/auth/phone (OTP, usado por LoginModal legacy)', () => {
 
     expect(JSON.stringify(json)).not.toContain('tok-secreto');
   });
+
+  it('si la transferencia guest→cuenta FALLA => 500 SIN cookie de sesión ni rotación (handoff-first)', async () => {
+    (loginWithPhone as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+    (transferSessionDataToUser as any).mockRejectedValueOnce(new Error('handoff down'));
+
+    const res = await phoneRoutePOST(jsonRequest('/api/auth/phone', BODY));
+    const json = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(json.success).toBe(false);
+    expect(json.error).toContain('permanecen intactos');
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(setSessionCookie).not.toHaveBeenCalled();
+    expect(rotateGuestSessionCookie).not.toHaveBeenCalled();
+  });
 });
 
 describe('ENDPOINT /api/auth/customer/login', () => {
@@ -174,6 +190,64 @@ describe('ENDPOINT /api/auth/customer/login', () => {
     expect(res.status).toBe(200);
     expectSafeUserPayload(json);
   });
+
+  it('login exitoso transfiere la sesión guest UNA vez y rota la cookie de invitado', async () => {
+    (loginWithPassword as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+
+    const res = await customerLoginPOST(
+      jsonRequest('/api/auth/customer/login', {
+        method: 'password',
+        phoneOrEmail: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(transferSessionDataToUser).toHaveBeenCalledWith('guest-session-1', RAW_DB_USER.id);
+    expect(rotateGuestSessionCookie).toHaveBeenCalledTimes(1);
+  });
+
+  it('handoff-first: la transferencia ocurre ANTES de publicar la cookie y rotar la guest', async () => {
+    (loginWithPassword as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+
+    const res = await customerLoginPOST(
+      jsonRequest('/api/auth/customer/login', {
+        method: 'password',
+        phoneOrEmail: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+
+    expect(res.status).toBe(200);
+    const orderOf = (fn: any) => fn.mock.invocationCallOrder[0];
+    expect(orderOf(transferSessionDataToUser)).toBeLessThan(orderOf(setSessionCookie));
+    expect(orderOf(transferSessionDataToUser)).toBeLessThan(orderOf(rotateGuestSessionCookie));
+  });
+
+  it('si la transferencia guest→cuenta FALLA => 500 SIN cookie de sesión, sin rotación y sin reset de rate limit', async () => {
+    (loginWithPassword as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+    (transferSessionDataToUser as any).mockRejectedValueOnce(new Error('handoff down'));
+
+    const res = await customerLoginPOST(
+      jsonRequest('/api/auth/customer/login', {
+        method: 'password',
+        phoneOrEmail: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+    const json = await res.json();
+
+    // Handoff-first: jamás se publica un 200 autenticado con datos guest
+    // invisibles; la sesión guest conserva acceso y el cliente reintenta.
+    expect(res.status).toBe(500);
+    expect(json.success).toBe(false);
+    expect(json.error).toContain('permanecen intactos');
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(setSessionCookie).not.toHaveBeenCalled();
+    expect(rotateGuestSessionCookie).not.toHaveBeenCalled();
+    expect(mockDb.rateLimit.deleteMany).not.toHaveBeenCalled(); // resetRateLimit NO ejecutado
+  });
 });
 
 describe('ENDPOINT /api/auth/register', () => {
@@ -192,5 +266,46 @@ describe('ENDPOINT /api/auth/register', () => {
     expect(res.status).toBe(200);
     expect(json.data.user.id).toBe(RAW_DB_USER.id);
     expectSafeUserPayload(json);
+  });
+
+  it('registro exitoso transfiere la sesión guest y rota la cookie de invitado', async () => {
+    (registerCustomer as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+
+    const res = await registerPOST(
+      jsonRequest('/api/auth/register', {
+        name: 'Cliente Crudo',
+        phone: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(transferSessionDataToUser).toHaveBeenCalledTimes(1);
+    expect(transferSessionDataToUser).toHaveBeenCalledWith('guest-session-1', RAW_DB_USER.id);
+    expect(rotateGuestSessionCookie).toHaveBeenCalledTimes(1);
+  });
+
+  it('si la transferencia guest→cuenta FALLA => 500 (cuenta persistida) SIN cookie, sin rotación ni reset', async () => {
+    (registerCustomer as any).mockResolvedValue({ token: 'tok', user: RAW_DB_USER });
+    (transferSessionDataToUser as any).mockRejectedValueOnce(new Error('handoff down'));
+
+    const res = await registerPOST(
+      jsonRequest('/api/auth/register', {
+        name: 'Cliente Crudo',
+        phone: '3001234567',
+        password: TEST_API_PASSWORD,
+      })
+    );
+    const json = await res.json();
+
+    // La cuenta persiste INTENCIONALMENTE (sin compensación destructiva):
+    // la sesión guest conserva acceso y el login posterior completa el
+    // handoff. Jamás se publica una sesión autenticada sin handoff.
+    expect(res.status).toBe(500);
+    expect(json.success).toBe(false);
+    expect(json.error).toContain('Tu cuenta fue creada');
+    expect(setSessionCookie).not.toHaveBeenCalled();
+    expect(rotateGuestSessionCookie).not.toHaveBeenCalled();
+    expect(mockDb.rateLimit.deleteMany).not.toHaveBeenCalled(); // resetRateLimit NO ejecutado
   });
 });

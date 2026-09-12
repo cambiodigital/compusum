@@ -106,6 +106,7 @@ describe('Checkout and Customer Logic', () => {
 
     it('creates new customer record when not found (teléfono canónico)', async () => {
       const mockTx = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
         user: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'new-cust-1', ...data })),
@@ -121,6 +122,12 @@ describe('Checkout and Customer Logic', () => {
       expect(result.customer.phone).toBe('573009876543');
       expect(result.customer.role).toBe('CUSTOMER');
       expect(result.isNewCustomer).toBe(true);
+      // Alta concurrentemente segura: advisory de contacto antes del create
+      // (claves canónicas email + teléfono, orden fijo email→teléfono)
+      expect(mockTx.$queryRaw).toHaveBeenCalledTimes(2);
+      const lockKeys = mockTx.$queryRaw.mock.calls.map((c: any[]) => String(c[0]));
+      expect(lockKeys[0]).toContain('compusum:contact-email:');
+      expect(lockKeys[1]).toContain('compusum:contact-phone:');
       expect(mockTx.user.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ phone: '573009876543', role: 'CUSTOMER' }),
       });

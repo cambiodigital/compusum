@@ -28,12 +28,23 @@ export async function GET(request: NextRequest) {
 
     const orders = await db.order.findMany({
       where: whereClause,
-      include: {
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        requestType: true,
+        subtotal: true,
+        sentVia: true,
+        createdAt: true,
+        agent: { select: { name: true } },
         items: {
           select: {
             id: true,
+            productId: true,
+            variantId: true,
             productName: true,
             productSku: true,
+            variantName: true,
             quantity: true,
             unitPrice: true,
           },

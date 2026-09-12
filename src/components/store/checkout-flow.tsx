@@ -36,6 +36,7 @@ import { formatPrice } from "@/lib/format";
 import { isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { toast } from "sonner";
 import Link from "next/link";
+import { useRef } from "react";
 
 const STEPS = [
   { id: "resumen", label: "Resumen", icon: ShoppingCart },
@@ -55,6 +56,9 @@ export function CheckoutFlow() {
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState("576063335206");
   const [catalogMode, setCatalogMode] = useState(false);
+  const [createdRequestType, setCreatedRequestType] = useState<"pedido" | "cotizacion">("pedido");
+  // Claves de idempotencia por carrito (una por checkout, reutilizada en retry)
+  const idempotencyKeyRef = useRef<Record<string, string>>({});
   const items = useCartStore((s) => s.items);
   const customerInfo = useCartStore((s) => s.customerInfo);
   const setCustomerInfo = useCartStore((s) => s.setCustomerInfo);
@@ -185,6 +189,25 @@ export function CheckoutFlow() {
       return false;
     }
 
+    // Fase 3: cotización si hay ítems en modo catálogo o sin precio real
+    // (el servidor re-valida; esto es solo la decisión de UX).
+    const hasUnpricedItems = items.some(
+      (item) => !isItemInCatalogMode(item.product, catalogMode) &&
+        !(item.product.wholesalePrice || item.product.price)
+    );
+    const requestType = hasCatalogItems || hasUnpricedItems ? "cotizacion" : "pedido";
+
+    // Idempotencia: una clave por carrito reutilizada en reintentos del mismo
+    // checkout; el servidor devuelve el pedido ya creado si la respuesta se
+    // perdió (evita duplicados por doble click o retry de red).
+    if (!idempotencyKeyRef.current[cartId]) {
+      idempotencyKeyRef.current[cartId] =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `chk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    const idempotencyKey = idempotencyKeyRef.current[cartId];
+
     setCreatingOrder(true);
     try {
       // We need the server cart ID, so fetch it
@@ -201,7 +224,11 @@ export function CheckoutFlow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cartId: cartData.data.id,
-          customerName: customerInfo.name || "Cliente",
+          requestType,
+          idempotencyKey,
+          // Sin contacto no se fuerza un nombre: el servidor responde
+          // CONTACT_INVALID y el usuario completa sus datos (invitado).
+          customerName: customerInfo.name || null,
           customerEmail: customerInfo.email || null,
           customerPhone: customerInfo.phone || null,
           customerCompany: customerInfo.company || null,
@@ -213,6 +240,8 @@ export function CheckoutFlow() {
       const data = await res.json();
       if (data.success) {
         setOrderNumber(data.data.orderNumber);
+        setCreatedRequestType(data.data.requestType === "cotizacion" ? "cotizacion" : "pedido");
+        delete idempotencyKeyRef.current[cartId];
         if (sentVia === "sistema") {
           setOrderDialogOpen(true);
         }
@@ -435,14 +464,19 @@ export function CheckoutFlow() {
                 <div className="bg-green-50 border border-green-200 rounded-xl p-5 text-center">
                   <CheckCircle2 className="h-10 w-10 text-green-600 mx-auto mb-3" />
                   <p className="text-lg font-bold text-green-800">
-                    {hasCatalogItems ? "¡Solicitud enviada!" : "¡Pedido registrado!"}
+                    {createdRequestType === "cotizacion" ? "¡Solicitud enviada!" : "¡Pedido registrado!"}
                   </p>
                   <p className="text-sm font-mono text-green-700 mt-1">{orderNumber}</p>
                   <p className="text-xs text-green-600 mt-2">
-                    {hasCatalogItems
+                    {createdRequestType === "cotizacion"
                       ? "Recibimos tu solicitud. Te enviaremos la cotización pronto."
                       : "Tu pedido está registrado. Pronto nos comunicamos para confirmar los detalles."}
                   </p>
+                  <div className="flex gap-2 justify-center mt-4">
+                    <Button asChild size="sm" variant="outline" className="gap-1">
+                      <Link href={`/mis-pedidos`}>Ver mis pedidos</Link>
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -510,14 +544,14 @@ export function CheckoutFlow() {
                       </div>
                     </div>
                     <DialogTitle className="text-center text-green-800">
-                      {hasCatalogItems ? "¡Solicitud registrada!" : "¡Pedido registrado!"}
+                      {createdRequestType === "cotizacion" ? "¡Solicitud registrada!" : "¡Pedido registrado!"}
                     </DialogTitle>
                     <DialogDescription className="text-center">
                       <span className="block font-mono text-base font-semibold text-slate-800 mt-1 break-all">
                         {orderNumber}
                       </span>
                       <span className="block text-sm mt-3 text-slate-600">
-                        {hasCatalogItems
+                        {createdRequestType === "cotizacion"
                           ? "Recibimos tu solicitud de cotización. Pronto nos vamos a comunicar con vos para enviarte los precios."
                           : "Tu pedido quedó registrado. Pronto nos vamos a comunicar con vos para confirmar los detalles y coordinar la entrega."}
                       </span>

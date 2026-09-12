@@ -17,6 +17,7 @@ import {
   Phone,
   Building2,
   ExternalLink,
+  HeadsetIcon,
 } from "lucide-react";
 import { formatPrice } from "@/lib/format";
 
@@ -38,15 +39,18 @@ export default async function AdminOrderDetailPage({ params }: Props) {
       items: true,
       statusHistory: { orderBy: { createdAt: "asc" } },
       cart: { select: { uuid: true } },
+      agent: { select: { id: true, name: true } },
     },
   });
 
   if (!order) notFound();
 
+  const isCotizacion = order.requestType === "cotizacion";
+
   return (
     <div>
       <Header
-        title={`Pedido ${order.orderNumber}`}
+        title={`${isCotizacion ? "Cotización" : "Pedido"} ${order.orderNumber}`}
         subtitle={`Creado el ${new Date(order.createdAt).toLocaleString("es-CO")}`}
       />
 
@@ -60,6 +64,11 @@ export default async function AdminOrderDetailPage({ params }: Props) {
             </Link>
           </Button>
           <div className="flex items-center gap-2">
+            {isCotizacion && (
+              <Badge variant="outline" className="text-orange-600 border-orange-200 bg-orange-50">
+                Cotización
+              </Badge>
+            )}
             <OrderStatusBadge status={order.status} />
             {order.webhookSent && (
               <Badge variant="outline" className="text-purple-600 border-purple-200">
@@ -109,6 +118,14 @@ export default async function AdminOrderDetailPage({ params }: Props) {
                 <div className="flex items-center gap-2 text-slate-600">
                   <Building2 className="h-4 w-4 text-slate-400" />
                   {order.customerCompany}
+                </div>
+              )}
+              {order.agent && (
+                <div className="flex items-center gap-2 text-slate-600 border-t border-slate-100 pt-2 mt-2">
+                  <HeadsetIcon className="h-4 w-4 text-slate-400" />
+                  <span>
+                    Asesor asignado: <span className="font-medium">{order.agent.name}</span>
+                  </span>
                 </div>
               )}
             </CardContent>

@@ -7,6 +7,11 @@ import { SharedCartView } from "@/components/store/shared-cart-view";
 import { isGlobalCatalogModeEnabled } from "@/lib/catalog-mode";
 import { getSessionPricingContext } from "@/lib/pricing-context";
 import { attachResolvedPricesToCartItems } from "@/lib/pricing";
+import {
+  authorizeCartViewer,
+  buildSharedCartDTO,
+  getCartViewer,
+} from "@/lib/shared-cart";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +34,12 @@ export async function generateMetadata({ params }: PageProps) {
   };
 }
 
+/**
+ * MISMA política y MISMO DTO que GET /api/carts/[uuid] (capability-link):
+ * autorización y serialización centralizadas en src/lib/shared-cart.ts.
+ * El visor ve SU precio autorizado; nunca recibe email/teléfono del dueño ni
+ * el snapshot/precio privado del propietario.
+ */
 export default async function SharedCartPage({ params }: PageProps) {
   const { uuid } = await params;
   const catalogMode = await isGlobalCatalogModeEnabled();
@@ -55,13 +66,14 @@ export default async function SharedCartPage({ params }: PageProps) {
     },
   });
 
-  if (!cart || !cart.isActive) {
+  const viewer = await getCartViewer();
+  const access = authorizeCartViewer(cart, viewer);
+
+  if (!cart || !access.allowed) {
     notFound();
   }
 
   // Motor único de precios: resolvedPrice por VISOR (sesión server-side).
-  // Un invitado que abre un carrito compartido ve su precio autorizado,
-  // nunca el precio de perfil del dueño.
   let viewerCart: typeof cart = cart;
   try {
     const pricingCtx = await getSessionPricingContext();
@@ -70,60 +82,14 @@ export default async function SharedCartPage({ params }: PageProps) {
     console.error("Shared cart price resolution failed", error);
   }
 
-  // Serialize for client component
-  const cartData = {
-    uuid: viewerCart.uuid,
-    customerName: viewerCart.customerName,
-    customerEmail: viewerCart.customerEmail,
-    customerPhone: viewerCart.customerPhone,
-    customerCompany: viewerCart.customerCompany,
-    notes: viewerCart.notes,
-    subtotal: viewerCart.subtotal,
-    status: viewerCart.status,
-    city: viewerCart.city
-      ? {
-          name: viewerCart.city.name,
-          department: viewerCart.city.department.name,
-          shippingRoute: viewerCart.city.shippingRoute
-            ? {
-                name: viewerCart.city.shippingRoute.name,
-                estimatedDaysMin: viewerCart.city.shippingRoute.estimatedDaysMin,
-                estimatedDaysMax: viewerCart.city.shippingRoute.estimatedDaysMax,
-                shippingCompany: viewerCart.city.shippingRoute.shippingCompany,
-              }
-            : null,
-        }
-      : null,
-    items: viewerCart.items.map((item) => ({
-      id: item.id,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      resolvedPrice: (item as any).resolvedPrice ?? null,
-      product: {
-        id: item.product.id,
-        name: item.product.name,
-        slug: item.product.slug,
-        sku: item.product.sku,
-        variantId: item.variantId,
-        variantName: item.variantName,
-        variantCode: item.variantCode,
-        price: item.product.price,
-        wholesalePrice: item.product.wholesalePrice,
-        minWholesaleQty: item.product.minWholesaleQty,
-        stockStatus: item.product.stockStatus,
-        catalogMode: item.product.catalogMode,
-        brand: item.product.brand,
-        category: item.product.category,
-      },
-    })),
-  };
+  const dto = buildSharedCartDTO(viewerCart, catalogMode);
 
   return (
     <div className="min-h-screen flex flex-col bg-white">
       <Header />
       <main className="flex-1 py-8 md:py-12">
         <div className="container mx-auto px-4">
-          <SharedCartView cart={cartData} catalogMode={catalogMode} />
+          <SharedCartView cart={dto} catalogMode={catalogMode} canManage={access.canManage} />
         </div>
       </main>
       <Footer />

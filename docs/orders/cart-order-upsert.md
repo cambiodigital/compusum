@@ -1,253 +1,148 @@
-# Guía de Implementación: Sistema de Upsert para Carritos y Órdenes
+# Semántica Cart vs Order (Fase 3)
 
-## Resumen del Cambio
-Sistema que previene duplicación de órdenes usando una lógica **"upsert"** basada en `sessionId` para usuarios invitados y `userId` para usuarios autenticados. Garantiza un único carrito/orden activo por usuario o sesión.
+> Esta guía reemplaza la semántica de "upsert de órdenes" documentada
+> previamente en este archivo (un único `solicitado` por sesión/cuenta con
+> reemplazo silencioso). Esa semántica fue retirada en la Fase 3 porque
+> provocaba que un cliente que hacía otro pedido terminara MODIFICANDO el
+> anterior en lugar de crear historial independiente.
 
----
+## Resumen de la semántica vigente
 
-## 📋 Checklist de Implementación
+- **Cart = borrador mutable.** El cliente lo edita libremente; puede contener
+  productos con precio (`unitPrice`) o pendientes de cotización
+  (`unitPrice = null`). Se convierte (`status = 'convertido'`) al confirmarse
+  un pedido.
+- **Order = snapshot histórico e inmutable de una solicitud enviada.**
+  `OrderItem.unitPrice` conserva el precio con el que se creó y NUNCA se
+  reprecia cuando cambia el precio actual. `OrderStatusHistory` conserva las
+  transiciones.
+- **Cada checkout confirmado crea SIEMPRE un Order nuevo.** Un CUSTOMER puede
+  tener varios pedidos `solicitado` independientes (los índices únicos
+  parciales `Order_sessionId_status_unique_idx` y
+  `Order_customerId_status_unique_idx` fueron retirados en la migración
+  `20260907140000_order_lifecycle_request_type`).
 
-### Fase 1: Migración y Schema (COMPLETADA)
+## Prevención de doble submit (sustituye a los índices únicos)
 
-- [x] **Schema de Prisma actualizado**
-  - Agregados campos `sessionId` y `userId` a `Cart`
-  - Agregado campo `sessionId` a `Order`
-  - Índices únicos para garantizar un único carrito/orden activo
+La protección vive en `src/lib/order-create.ts` (`createOrderFromCart`):
 
-- [x] **Migración SQL creada**
-  - Ruta: `prisma/migrations/20260312090000_add_session_based_upsert/migration.sql`
-  - Adds columns y creates unique indexes
+1. **Lock transaccional del carrito**: dentro de la transacción de creación
+   se toma `SELECT ... FOR UPDATE` sobre el `Cart`. Dos POST concurrentes del
+   mismo checkout se serializan; el segundo relee el estado y falla con
+   `409 CART_INACTIVE` (el carrito ya fue convertido por el primero).
+2. **Idempotencia por clave** (`Order.idempotencyKey`, índice único): el
+   cliente genera una clave por checkout y la reutiliza en reintentos. Si la
+   respuesta se pierde, el reintento devuelve el pedido ya creado
+   (`replayed: true`) en vez de duplicarlo. La clave solo matchea pedidos de
+   la misma sesión/cliente.
 
-- [x] **Helpers implementados**
-  - Ruta: `src/lib/order-cart-upsert.ts`
-  - Funciones de upsert para carritos y órdenes
-  - Funciones de transferencia de sesión a usuario
+Prueba PostgreSQL real de concurrencia: `tests/integration/order-lifecycle-pg.test.ts`.
 
-- [x] **APIs actualizadas**
-  - `src/app/api/carts/route.ts`: Soporta upsert y acciones (save, add, update, remove)
-  - `src/app/api/orders/route.ts`: Actualiza orden existente si hay una activa
-  - `src/middleware.ts`: Genera y mantiene `x-session-id`
+## Edición vs Volver a pedir
 
-### Fase 2: Ejecución de Migraciones (PENDIENTE - HACER EN ENTORNO CON BD)
+- **Editar** (`PATCH /api/orders/[id]`, `src/lib/order-edit.ts`): solo un
+  pedido EXPLÍCITO, solo en estado `solicitado`, con propiedad validada
+  server-side; re-valida stock/precios con el motor único y audita en
+  `OrderStatusHistory` (from = to, `changedBy: 'cliente'`). Los estados
+  `compartido` / `recibido` no permiten tocar líneas históricas.
+- **Volver a pedir** (`POST /api/orders/[id]/reorder`,
+  `src/lib/order-reorder.ts`): parte de cualquier pedido permitido; valida
+  existencia/activo/stock/mínimos ACTUALES, resuelve precios ACTUALES del
+  perfil del visor y carga el carrito activo (`mode: add|replace` con
+  conflicto controlado, `allowPartial` con confirmación explícita). El pedido
+  origen queda intacto; al confirmar se genera un pedido nuevo con número
+  distinto.
 
-**Pasos en terminal:**
+## Atomicidad de la edición (`editCustomerOrder`)
 
-```bash
-cd x:\Proyectos\Compusum
+TODAS las escrituras de una edición (reemplazo de líneas, actualización del
+pedido y auditoría) ocurren dentro de UNA sola transacción:
 
-# 1. Asegurar que DATABASE_URL esté configurada
-# En .env.local o similar:
-# DATABASE_URL=postgresql://usuario:contraseña@localhost:5432/compusum
+1. La validación pura del body (forma de items, formato de email) ocurre
+   ANTES de abrir la transacción: un payload inválido nunca escribe nada.
+2. Lock pesimista de la fila (`SELECT ... FOR UPDATE` sobre `Order`)
+   serializa la edición con cambios de estado concurrentes (p.ej. el webhook
+   `solicitado → compartido`); el estado se RE-chequea sobre la lectura
+   bloqueada y el update final es condicionado
+   (`updateMany where status = 'solicitado'`): doble guarda anti-carrera.
+3. `cityId` se valida contra el maestro de ciudades dentro de la transacción
+   (antes de reescribir líneas): un valor inválido responde `400 Ciudad no
+   válida` en vez de un `P2003` con el pedido ya reescrito.
+4. **Promoción cotización → pedido** (cambio de `requestType` sin editar
+   líneas): re-valida TODAS las líneas existentes en modo `pedido` (cada una
+   exige precio resuelto > 0) y REESCRIBE las líneas con los snapshots
+   re-validados (un pedido jamás conserva `unitPrice = null`), actualizando
+   el subtotal re-validado. Si alguna línea falla (precio, stock, inactivo),
+   la conversión se rechaza con 400 y el pedido permanece como cotización.
+   El paso inverso (pedido → cotización) es libre.
 
-# 2. Ejecutar migraciones
-bunx prisma migrate deploy
+## Atomicidad del reorder (`reorderOrderItems`)
 
-# 3. Regenerar cliente de Prisma
-bunx prisma generate
+La fase de escritura del reorder ocurre dentro de UNA transacción con lock
+pesimista del carrito (`SELECT ... FOR UPDATE` sobre `Cart`, mismo patrón que
+el checkout) y RE-LECTURA fresca de sus líneas: el estado FINAL (líneas del
+carrito combinadas con las del pedido) se valida con el motor ANTES de
+destruir el carrito anterior.
 
-# 4. Verificar que la base está al día
-bunx prisma migrate status
+- `allowPartial=false` + fallo de stock al combinar (p.ej. 8 en el carrito +
+  5 del pedido con stock 10): aborta con `409` y CERO writes — el carrito del
+  cliente queda byte a byte igual.
+- `allowPartial=true`: una línea COMBINADA nunca se encoge por debajo de las
+  unidades que el cliente YA tenía; se conserva la cantidad original del
+  carrito y solo la adición del reorder se marca `exceeds_stock`.
+- El conflicto de carrito existente y la re-evaluación de bloqueos se
+  re-chequean dentro de la transacción sobre las líneas frescas.
 
-# 5. Opcionalmente, ejecutar el seed
-bun run seed
-```
+## Ruta única de checkout
 
-### Fase 3: Integración en Rutas de Autenticación (PENDIENTE - CÓDIGO)
+La ruta legada `POST /api/carts/checkout` (`processCheckout`: items desde el
+body, sin lock de carrito, sin idempotencia, sin conversión de carrito ni
+historial) fue RETIRADA. El único camino de checkout es
+`POST /api/orders` → `createOrderFromCart`, que concentra lock del carrito +
+`idempotencyKey` + conversión + `OrderStatusHistory`.
 
-En los endpoints donde se autentica un usuario (login, registro), después de validar credentials:
+## Política de ciclo de vida invitado
 
-```typescript
-// En src/app/api/auth/[action]/route.ts o similar
-import { transferSessionDataToUser } from '@/lib/checkout';
+Una sesión invitada accede a un pedido exactamente cuando el `x-session-id`
+coincide (`order-access.ts`): **el `customerId` asignado por el auto-enlace
+de contacto del checkout (`resolveOrderCustomer`) es un enlace CRM, NO una
+transferencia de propiedad** — no rompe el acceso de la sesión que creó el
+pedido. Esa sesión sigue viendo el pedido en `/api/orders/mine` (consulta
+por sessionId) y en detalle/reorder/edición, todas con la misma regla. La
+transferencia de propiedad ocurre SOLO por el flujo explícito de
+login/registro (`transferSessionDataToUser` ⇒ `order.sessionId = null`,
+`customerId = userId`): desde ahí la sesión invitada pierde acceso y la
+cuenta cliente lo gana. El aislamiento no cambia: otra sesión recibe 403 y
+un CUSTOMER autenticado nunca puede usar un sessionId de invitado.
 
-export async function POST(request: NextRequest) {
-  // ... validar usuario ...
-  
-  const sessionId = request.headers.get('x-session-id');
-  const userId = user.id;
-  
-  // Transferir carrito y órdenes de sesión a usuario
-  if (sessionId) {
-    await transferSessionDataToUser(sessionId, userId);
-  }
-  
-  // ... crear sesión y retornar respuesta ...
-}
-```
+## Pedido vs Cotización
 
-### Fase 4: Actualización del Cliente (PENDIENTE - CÓDIGO)
+`Order.requestType = 'pedido' | 'cotizacion'` (existentes => `'pedido'`).
+La validación compartida (`validateAndPriceItems` en
+`src/lib/cart-validation.ts`) acepta `requestType`:
 
-Las APIs automáticamente obtienen `sessionId` del middleware. Sin embargo, si necesitas acceso explícito desde cliente:
+- `pedido`: cada línea exige precio resuelto > 0.
+- `cotizacion`: permite líneas con precio no resuelto (`unitPrice = null`),
+  validando igualmente producto, variante, cantidad, mínimos e inventario.
 
-```typescript
-// src/stores/cart-store.ts o similar
-export function getSessionId(): string | undefined {
-  if (typeof document === 'undefined') return undefined;
-  const match = document.cookie.match(/x-session-id=([^;]+)/);
-  return match?.[1];
-}
-```
+El `agentId` del pedido proviene siempre del maestro del cliente
+(`User.assignedAgentId`) vía `resolveOrderCustomer`; nunca del navegador. El
+webhook incluye `requestType`, `agentId` y `agentName` para enrutamiento
+interno; un fallo de webhook NO pierde la solicitud (el Order persiste con
+`webhookSent = false` y el resultado en `webhookResponse`).
 
----
+## Carrito compartido
 
-## 🔍 Validación Operacional
+La página `/carrito/[uuid]` y el API `GET /api/carts/[uuid]` usan la MISMA
+política y el MISMO DTO (`src/lib/shared-cart.ts`): el UUID funciona como
+capability-link de lectura; cada visor ve SU precio autorizado (motor único,
+contexto de su sesión) y el DTO público nunca incluye email/teléfono del
+dueño, su snapshot de precio ni datos administrativos.
 
-### Verificaciones Pre-Deploy
+## Transferencia de sesión (invitado -> cliente)
 
-1. **Schema Prisma**
-   ```bash
-   bunx prisma validate
-   ```
-   ✓ Schema válido (11 modelos, sessionId presente en Cart y Order)
-
-2. **Migraciones**
-   ✓ SQL sintácticamente correcto
-   ✓ Índices únicos creados correctamente
-   ✓ Campos nuevos bien definidos
-
-3. **Tipos TypeScript**
-   - NOTA: Errores en `order-cart-upsert.ts` desaparecen después de `prisma generate`
-   - Los errores actuales son falsos positivos (Prisma Client aún no regenerado)
-
-4. **APIs**
-   ✓ `POST /api/carts` soporta upsert con `action` parameter
-   ✓ `GET /api/carts` obtiene carrito activo de sesión/usuario
-   ✓ `POST /api/orders` verifica orden activa existente
-   ✓ Middleware genera y mantiene `x-session-id`
-
----
-
-## 🔐 Garantías de Integridad
-
-### Antes de esta solución:
-```
-Usuario invitado visita -> Carrito 1
-Usuario modifica -> Carrito 2
-Usuario modifica -> Carrito 3
-Usuario checkout -> Orden 1, Orden 2, Orden 3 ❌ DUPLICADOS
-```
-
-### Después de esta solución:
-```
-Usuario invitado visita -> Carrito 1 (sessionId: ABC)
-Usuario modifica -> Carrito 1 ACTUALIZADO
-Usuario modifica -> Carrito 1 ACTUALIZADO
-Usuario checkout -> Orden 1 (sessionId: ABC) ✓ ÚNICO
-Usuario modifica pedido -> Orden 1 ACTUALIZADO ✓ NO DUPLICADO
-Usuario inicia sesión -> Orden 1 transferida a userId ✓
-```
-
----
-
-## 📊 Cambios de Base de Datos
-
-### Tabla `Cart`
-| Campo | Tipo | Notas |
-|-------|------|-------|
-| id | STRING (PK) | Existente |
-| sessionId | TEXT | **NUEVO** - Para invitados |
-| userId | TEXT | **NUEVO** - Para logueados |
-| status | STRING | Existente - activo/compartido/convertido/expirado |
-
-**Índices nuevos:**
-- `Cart_sessionId_idx`: Búsqueda rápida por sesión
-- `Cart_userId_idx`: Búsqueda rápida por usuario
-- `Cart_sessionId_status_unique_idx`: Garantiza 1 carrito activo por sesión
-
-### Tabla `Order`
-| Campo | Tipo | Notas |
-|-------|------|-------|
-| id | STRING (PK) | Existente |
-| sessionId | TEXT | **NUEVO** - Para rastreo de invitados |
-| status | STRING | Existente - solicitado/compartido/recibido |
-
-**Índices nuevos:**
-- `Order_sessionId_idx`: Búsqueda rápida por sesión
-- `Order_customerId_idx`: Búsqueda rápida por cliente
-- `Order_sessionId_status_unique_idx`: Garantiza 1 orden activa por sesión
-- `Order_customerId_status_unique_idx`: Garantiza 1 orden activa por usuario
-
----
-
-## 🚀 Flujo de Usuarios Después de Implementación
-
-### Usuario Invitado
-1. Visita sitio → Middleware genera `sessionId` → Se crea Carrito 1 (sessionId)
-2. Agrega productos → Carrito 1 ACTUALIZADO
-3. Modifica cantidades → Carrito 1 ACTUALIZADO (NO crea nuevo)
-4. Inicia checkout → Se busca Orden activa (sessionId)
-   - Si existe → Ordem ACTUALIZADA
-   - Si no existe → Orden nueva creada
-
-### Usuario Registrado
-1. Inicia sesión → `transferSessionDataToUser()` llamado
-   - Carrito de sesión → transferido a `userId`
-   - Orden de sesión → transferida a `userId` y `customerId`
-2. Modifica carrito → Carrito ACTUALIZADO (mismo ID)
-3. Checkout → Orden ACTUALIZADA (no crea nueva)
-
----
-
-## ⚠️ Consideraciones Operacionales
-
-1. **Transacciones**: Todos los upserts usan `db.$transaction()` para atomicidad
-2. **Índices únicos**: Aplicados con `WHERE status='solicitado'` para solo órdenes activas
-3. **Backward compatibility**: Registros anteriores sin `sessionId` seguirán funcionando
-4. **Performance**: Índices nuevos optimizan búsquedas por sesión/usuario
-
----
-
-## 🐛 Troubleshooting
-
-### Problema: "Column 'sessionId' does not exist"
-**Solución**: Ejecutar `bunx prisma migrate deploy`
-
-### Problema: "TS2353: sessionId does not exist in type 'CartCreateInput'"
-**Solución**: Ejecutar `bunx prisma generate` después de migración
-
-### Problema: Órdenes aún se duplican
-**Revisar**:
-1. ¿Se ejecutó la migración? → `bunx prisma migrate status`
-2. ¿El middleware está activo? → Verificar header `x-session-id` en requests
-3. ¿Se llama a `findActiveOrder()` antes de crear? → Revisar lógica en route handler
-
----
-
-## 📚 Archivos Modificados/Creados
-
-### Creados:
-- `prisma/migrations/20260312090000_add_session_based_upsert/migration.sql`
-- `src/lib/order-cart-upsert.ts` (280 líneas de helpers)
-
-### Modificados:
-- `prisma/schema.prisma` (agregados campos sessionId/userId, índices)
-- `src/middleware.ts` (manejo de sessionId)
-- `src/app/api/carts/route.ts` (lógica upsert, soporte acciones)
-- `src/app/api/orders/route.ts` (verifica orden activa, actualiza vs crea)
-- `src/lib/checkout.ts` (agregada función de transferencia)
-
----
-
-## ✅ Validación Final
-
-Después de ejecutar las migraciones:
-
-```bash
-# Verificar que los cambios están en la DB
-SELECT COUNT(*) FROM Cart WHERE sessionId IS NOT NULL;
-SELECT COUNT(*) FROM "Order" WHERE sessionId IS NOT NULL;
-
-# Probar un flujo completo:
-# 1. Usuario invitado crea carrito
-# 2. Modifica el carrito (debe actualizar, no crear nuevo)
-# 3. Crea orden
-# 4. Modifica orden (debe actualizar, no crear nueva)
-# 5. Inicia sesión
-# 6. Verifica que carrito y orden se vincularon a su userId
-```
-
----
-
-**Versión**: 1.0  
-**Fecha**: 12 de marzo de 2026  
-**Estado**: Implementación Completada, Pendiente de Ejecución en BD
+En login/registro se sigue usando `transferSessionDataToUser`
+(`src/lib/checkout.ts`, `src/lib/order-cart-upsert.ts`): transfiere el
+carrito activo de la sesión al usuario y reasigna las órdenes de la sesión
+(`sessionId = null`, `customerId = userId`). Con la semántica nueva esto
+puede transferir MÚLTIPLES órdenes sin conflicto de índices.

@@ -1,11 +1,14 @@
 import { db } from './db';
 import { hashPassword } from './auth';
-import { Prisma } from '@prisma/client';
-import { validateAndPriceItems } from './cart-validation';
-import { resolveServerPricingCustomer } from './pricing';
-import { generateOrderNumber, createOrderTransactionWithRetry } from './order-number';
 import { getNextRouteDeparture } from './route-schedule';
 import { canonicalColombiaPhone, phoneOrVariants } from './phone';
+import {
+  transferSessionCartToUserTx,
+  transferSessionOrdersToUserTx,
+  lockGuestSessionIdentity,
+  lockUserCartIdentity,
+  lockCheckoutContactIdentity,
+} from './order-cart-upsert';
 
 function generateTemporaryPassword(): string {
   const bytes = new Uint8Array(16);
@@ -68,6 +71,18 @@ export async function upsertCheckoutCustomer(
 
   let customer: any = await findCustomerByCheckoutContact(phone, email, tx);
 
+  if (!customer) {
+    // Contacto NUEVO: serializar el alta con el advisory de contacto (clave
+    // canónica, orden global en order-cart-upsert.ts) y RE-LEER bajo el lock.
+    // Dos checkouts concurrentes desde carritos/sesiones distintas con el
+    // mismo contacto nuevo: el primero crea el User y confirma; el segundo
+    // espera el advisory, re-lee, encuentra al cliente ya confirmado y cae al
+    // ENLACE de abajo. Así no existe find→create en carrera ni P2002 que
+    // obligue a consultar sobre una tx abortada (irrecuperable en PostgreSQL).
+    await lockCheckoutContactIdentity(tx, { email, phone });
+    customer = await findCustomerByCheckoutContact(phone, email, tx);
+  }
+
   if (customer) {
     const updateData: Record<string, string> = {};
 
@@ -96,41 +111,29 @@ export async function upsertCheckoutCustomer(
     };
   }
 
-  try {
-    const created = await tx.user.create({
-      data: {
-        phone,
-        email,
-        name: input.name?.trim().slice(0, 200) || 'Nuevo Cliente',
-        role: 'CUSTOMER',
-        password: await hashPassword(generateTemporaryPassword()),
-      },
-    });
+  // Bajo el advisory de contacto ningún checkout paralelo puede estar creando
+  // este mismo contacto: el create no compite en carrera. Un P2002 residual
+  // (escritor externo, p.ej. registro de cuenta con ese email entre find y
+  // create) aborta la tx limpiamente: NUNCA se consulta sobre una tx abortada
+  // y createOrderTransactionWithRetry NO lo reintenta (colisión de User ≠
+  // colisión de orderNumber); la ruta responde 409 "ya registrada".
+  const created = await tx.user.create({
+    data: {
+      phone,
+      email,
+      name: input.name?.trim().slice(0, 200) || 'Nuevo Cliente',
+      role: 'CUSTOMER',
+      password: await hashPassword(generateTemporaryPassword()),
+    },
+  });
 
-    return {
-      customer: created,
-      assignedAgentId: null,
-      normalizedPhone: phone,
-      normalizedEmail: email,
-      isNewCustomer: true,
-    };
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const existing = await findCustomerByCheckoutContact(phone, email, tx);
-
-      if (existing) {
-        return {
-          customer: existing,
-          assignedAgentId: existing.assignedAgentId,
-          normalizedPhone: phone,
-          normalizedEmail: email,
-          isNewCustomer: false,
-        };
-      }
-    }
-
-    throw error;
-  }
+  return {
+    customer: created,
+    assignedAgentId: null,
+    normalizedPhone: phone,
+    normalizedEmail: email,
+    isNewCustomer: true,
+  };
 }
 
 export interface SessionUserRef {
@@ -232,91 +235,31 @@ export async function findBestRouteForCity(cityId?: string | null, now = new Dat
   return routesWithNextDeparture[0]?.route || null;
 }
 
-export interface ProcessCheckoutOptions {
-  /**
-   * Usuario de la sesión autenticada server-side (getCurrentUser()).
-   * Determina el enlace del pedido y el contexto del motor de precios.
-   * JAMÁS se acepta un customerId desde el navegador.
-   */
-  sessionUser?: SessionUserRef | null;
-}
-
-export async function processCheckout(
-  checkoutData: any,
-  options: ProcessCheckoutOptions = {}
-) {
-  const { phone, email, name, items, cityId, cartId } = checkoutData;
-  const sessionUser = options.sessionUser ?? null;
-
-  return createOrderTransactionWithRetry(async (tx: any) => {
-    // El cliente que determina el precio SOLO procede de la sesión
-    // autenticada o de una acción administrativa (nunca del body del invitado).
-    const pricingCustomerId = await resolveServerPricingCustomer(
-      sessionUser,
-      { phone, email },
-      tx
-    );
-
-    const { validatedItems, subtotal } = await validateAndPriceItems(items, tx, {
-      customerId: pricingCustomerId,
-    });
-
-    const customerResult = await resolveOrderCustomer(
-      sessionUser,
-      { name, phone, email },
-      tx
-    );
-    const availableRoute = await findBestRouteForCity(cityId, new Date(), tx);
-    const orderNumber = await generateOrderNumber(tx);
-
-    const order = await tx.order.create({
-      data: {
-        orderNumber,
-        cartId,
-        customerId: customerResult.customer?.id || null,
-        customerName: customerResult.customer?.name || name || 'Cliente',
-        customerEmail: customerResult.normalizedEmail,
-        customerPhone: customerResult.normalizedPhone,
-        agentId: customerResult.assignedAgentId,
-        cityId,
-        routeId: availableRoute?.id,
-        subtotal,
-        items: {
-          create: validatedItems.map((item) => ({
-            productId: item.productId,
-            productName: item.productName,
-            variantId: item.variantId,
-            variantName: item.variantName,
-            variantCode: item.variantCode,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-          })),
-        },
-      },
-    });
-
-    return { order, route: availableRoute };
-  });
-}
-
 /**
  * Transferir carritos y órdenes de sesión a usuario cuando inicia sesión registrado
- * Llamar esto después de autenticar un usuario con sessionId
+ * Llamar esto después de autenticar un usuario con sessionId.
+ *
+ * La transferencia es UNA transacción REAL: orden global de locks Order→Cart
+ * (los pedidos se bloquean y transfieren primero, luego el carrito) para
+ * evitar deadlocks con reorder (Order→Cart) y checkout (Cart).
+ *
+ * Los advisory locks de identidad van PRIMERO (guest→user): serializan esta
+ * transferencia contra el checkout guest de la MISMA sesión (si el checkout
+ * confirma primero, el escaneo de Orders de abajo ve el pedido nuevo y lo
+ * transfiere; si la transferencia confirma primero, el checkout falla 403 en
+ * su re-chequeo de propiedad post-lock) y contra cualquier otra transferencia
+ * concurrente de la misma sesión o del mismo usuario.
  */
 export async function transferSessionDataToUser(sessionId: string, userId: string) {
-  const { transferSessionCartToUser } = await import('./order-cart-upsert');
-  const { transferSessionOrderToUser } = await import('./order-cart-upsert');
-
   return db.$transaction(async (tx) => {
-    // Transferir carrito
-    const transferredCart = await transferSessionCartToUser(sessionId, userId);
+    // Advisory locks de identidad: SIEMPRE primeras sentencias de la tx,
+    // en orden global guest→user.
+    await lockGuestSessionIdentity(tx, sessionId);
+    await lockUserCartIdentity(tx, userId);
 
-    // Transferir orden(es)
-    const transferredOrders = await transferSessionOrderToUser(sessionId, userId);
-
-    return {
-      cart: transferredCart,
-      orders: transferredOrders,
-    };
+    // Orden global: Order ANTES que Cart
+    const orders = await transferSessionOrdersToUserTx(tx, sessionId, userId);
+    const cart = await transferSessionCartToUserTx(tx, sessionId, userId);
+    return { cart, orders };
   });
 }

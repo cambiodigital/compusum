@@ -347,6 +347,11 @@ model Cart {
   expiresAt       DateTime?
 
   @@unique([sessionId, status]) // Garantiza un único carrito activo por sesión
+  // Identidad canónica de usuario: la exclusividad de UN único carrito activo
+  // por userId la garantiza un índice único parcial DB-native (no representable
+  // en schema.prisma), creado por la migración 20260912120000
+  // ("Cart_userId_status_activo_unique_idx", WHERE "userId" IS NOT NULL AND
+  // "status" = 'activo').
   @@index([uuid])
   @@index([status])
   @@index([sessionId])
@@ -404,6 +409,11 @@ model Order {
   notes           String?
   subtotal        Float
   status          String               @default("solicitado") // solicitado, compartido, recibido
+  // pedido | cotizacion. Existentes => "pedido" (migración 20260907140000).
+  requestType     String               @default("pedido")
+  // Idempotencia de checkout: dos POST concurrentes del MISMO checkout
+  // resuelven al mismo Order. null para pedidos creados fuera del checkout.
+  idempotencyKey  String?              @unique
   webhookSent     Boolean              @default(false)
   webhookResponse String?
   sentVia         String? // whatsapp, email, webhook

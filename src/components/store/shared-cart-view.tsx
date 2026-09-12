@@ -23,27 +23,21 @@ import { resolveProductImageSrc, resolveProductName, resolveProductSlug } from "
 import { isItemInCatalogMode } from "@/hooks/use-catalog-mode";
 import { toast } from "sonner";
 
-interface ResolvedPriceView {
-  unitPrice: number | null;
-  purchasable?: boolean;
-  requiresQuote?: boolean;
-}
-
 interface SharedCartItem {
   id: string;
+  productId: string;
+  variantId: string | null;
+  variantName: string | null;
+  variantCode: string | null;
   quantity: number;
+  /** Precio resuelto para el VISOR (server-side). null => requiere cotización. */
   unitPrice: number | null;
-  resolvedPrice?: ResolvedPriceView | null;
+  requiresQuote: boolean;
   product: {
     id: string;
     name: string;
     slug: string;
     sku: string | null;
-    variantId?: string | null;
-    variantName?: string | null;
-    variantCode?: string | null;
-    price: number | null;
-    wholesalePrice: number | null;
     minWholesaleQty: number;
     stockStatus: string;
     catalogMode?: boolean;
@@ -53,14 +47,16 @@ interface SharedCartItem {
 }
 
 interface SharedCartData {
+  id: string;
   uuid: string;
+  status: string;
+  /** Nombre/empresa del dueño. El DTO público NUNCA incluye email/teléfono. */
   customerName: string | null;
-  customerEmail: string | null;
-  customerPhone: string | null;
   customerCompany: string | null;
   notes: string | null;
-  subtotal: number;
-  status: string;
+  /** Subtotal para el VISOR. null impossible; hasQuoteItems indica parcial. */
+  subtotal: number | null;
+  hasQuoteItems: boolean;
   city: {
     name: string;
     department: string;
@@ -77,25 +73,21 @@ interface SharedCartData {
 interface SharedCartViewProps {
   cart: SharedCartData;
   catalogMode?: boolean;
+  /** El visor es el dueño (o admin): puede operar el carrito. */
+  canManage?: boolean;
 }
 
-export function SharedCartView({ cart, catalogMode = false }: SharedCartViewProps) {
+export function SharedCartView({ cart, catalogMode = false, canManage = false }: SharedCartViewProps) {
   const [copied, setCopied] = useState(false);
   const addItem = useCartStore((s) => s.addItem);
   const setOpen = useCartStore((s) => s.setOpen);
 
   const hasCatalogItems = catalogMode || cart.items.some((item) => isItemInCatalogMode(item.product, catalogMode));
+  const hasQuoteItems = cart.hasQuoteItems || cart.items.some((item) => item.requiresQuote);
 
   // Precio autorizado para el VISOR actual (resuelto server-side por sesión).
-  // Nunca usamos el snapshot del dueño cuando hay precio resuelto para el visor.
-  const viewerItemPrice = (item: SharedCartItem): number | null => {
-    if (item.resolvedPrice) {
-      return item.resolvedPrice.requiresQuote || item.resolvedPrice.unitPrice == null
-        ? null
-        : item.resolvedPrice.unitPrice;
-    }
-    return item.unitPrice || item.product.wholesalePrice || item.product.price || null;
-  };
+  const viewerItemPrice = (item: SharedCartItem): number | null =>
+    item.requiresQuote ? null : item.unitPrice;
 
   const subtotal = cart.items.reduce((sum, item) => {
     const price = viewerItemPrice(item);
@@ -111,7 +103,28 @@ export function SharedCartView({ cart, catalogMode = false }: SharedCartViewProp
 
   const handleLoadToMyCart = () => {
     cart.items.forEach((item) => {
-      addItem(item.product, item.quantity);
+      // El visor carga SU precio autorizado (server-side), nunca el snapshot
+      // del dueño. El servidor re-valida y re-precia al guardar/checkout.
+      const price = viewerItemPrice(item);
+      addItem(
+        {
+          id: item.product.id,
+          name: item.product.name,
+          slug: item.product.slug,
+          sku: item.product.sku,
+          variantId: item.variantId,
+          variantName: item.variantName,
+          variantCode: item.variantCode,
+          price,
+          wholesalePrice: price,
+          minWholesaleQty: item.product.minWholesaleQty,
+          stockStatus: item.product.stockStatus,
+          catalogMode: item.product.catalogMode,
+          brand: item.product.brand,
+          category: item.product.category,
+        },
+        item.quantity
+      );
     });
     toast.success("Productos agregados a tu carrito", {
       action: { label: "Ver carrito", onClick: () => setOpen(true) },
@@ -127,8 +140,8 @@ export function SharedCartView({ cart, catalogMode = false }: SharedCartViewProp
     cart.items.forEach((item, i) => {
       const price = viewerItemPrice(item);
       const ref = item.product.sku ? ` (Ref: ${item.product.sku})` : "";
-      const variant = item.product.variantName
-        ? ` [Variacion: ${item.product.variantName}]`
+      const variant = item.variantName
+        ? ` [Variacion: ${item.variantName}]`
         : "";
       const itemCatalogMode = isItemInCatalogMode(item.product, catalogMode);
       msg += `${i + 1}. ${resolveProductName(item.product.name)}${ref}${variant} x${item.quantity}`;
@@ -234,8 +247,8 @@ export function SharedCartView({ cart, catalogMode = false }: SharedCartViewProp
                   {item.product.sku && (
                     <p className="text-[11px] text-slate-400 font-mono">Ref: {item.product.sku}</p>
                   )}
-                  {item.product.variantName && (
-                    <p className="text-[11px] text-slate-500">Variacion: {item.product.variantName}</p>
+                  {item.variantName && (
+                    <p className="text-[11px] text-slate-500">Variacion: {item.variantName}</p>
                   )}
                   <div className="flex items-center justify-between mt-1">
                     <span className="text-xs text-slate-500">x{item.quantity}</span>
@@ -261,12 +274,20 @@ export function SharedCartView({ cart, catalogMode = false }: SharedCartViewProp
             <span className="text-slate-600 font-medium">Subtotal</span>
             {hasCatalogItems ? (
               <span className="text-base font-semibold text-slate-500">Cotización personalizada</span>
+            ) : hasQuoteItems ? (
+              <span className="text-base font-semibold text-slate-500">
+                {subtotal > 0 ? `Desde ${formatPrice(subtotal)} + por cotizar` : "Por cotizar"}
+              </span>
             ) : (
               <span className="text-2xl font-bold text-slate-900">{formatPrice(subtotal)}</span>
             )}
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            {hasCatalogItems ? 'Los precios se comparten por cotización.' : 'Precios sujetos a confirmación'}
+            {hasCatalogItems
+              ? "Los precios se comparten por cotización."
+              : hasQuoteItems
+              ? "Incluye productos por cotizar: NO es un total definitivo."
+              : "Precios sujetos a confirmación"}
           </p>
           {cart.notes && (
             <>

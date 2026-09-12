@@ -122,6 +122,7 @@ describe('Cart Validation and Pricing Logic', () => {
       quantity: 3,
       unitPrice: 40, // Uses wholesalePrice if available
       lineTotal: 120,
+      requiresQuote: false,
     });
     expect(result.subtotal).toBe(120);
   });
