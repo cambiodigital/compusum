@@ -1,6 +1,5 @@
 import { db } from './db';
 import { hashPassword } from './auth';
-import { Prisma } from '@prisma/client';
 import { getNextRouteDeparture } from './route-schedule';
 import { canonicalColombiaPhone, phoneOrVariants } from './phone';
 import {
@@ -8,6 +7,7 @@ import {
   transferSessionOrdersToUserTx,
   lockGuestSessionIdentity,
   lockUserCartIdentity,
+  lockCheckoutContactIdentity,
 } from './order-cart-upsert';
 
 function generateTemporaryPassword(): string {
@@ -71,6 +71,18 @@ export async function upsertCheckoutCustomer(
 
   let customer: any = await findCustomerByCheckoutContact(phone, email, tx);
 
+  if (!customer) {
+    // Contacto NUEVO: serializar el alta con el advisory de contacto (clave
+    // canónica, orden global en order-cart-upsert.ts) y RE-LEER bajo el lock.
+    // Dos checkouts concurrentes desde carritos/sesiones distintas con el
+    // mismo contacto nuevo: el primero crea el User y confirma; el segundo
+    // espera el advisory, re-lee, encuentra al cliente ya confirmado y cae al
+    // ENLACE de abajo. Así no existe find→create en carrera ni P2002 que
+    // obligue a consultar sobre una tx abortada (irrecuperable en PostgreSQL).
+    await lockCheckoutContactIdentity(tx, { email, phone });
+    customer = await findCustomerByCheckoutContact(phone, email, tx);
+  }
+
   if (customer) {
     const updateData: Record<string, string> = {};
 
@@ -99,41 +111,29 @@ export async function upsertCheckoutCustomer(
     };
   }
 
-  try {
-    const created = await tx.user.create({
-      data: {
-        phone,
-        email,
-        name: input.name?.trim().slice(0, 200) || 'Nuevo Cliente',
-        role: 'CUSTOMER',
-        password: await hashPassword(generateTemporaryPassword()),
-      },
-    });
+  // Bajo el advisory de contacto ningún checkout paralelo puede estar creando
+  // este mismo contacto: el create no compite en carrera. Un P2002 residual
+  // (escritor externo, p.ej. registro de cuenta con ese email entre find y
+  // create) aborta la tx limpiamente: NUNCA se consulta sobre una tx abortada
+  // y createOrderTransactionWithRetry NO lo reintenta (colisión de User ≠
+  // colisión de orderNumber); la ruta responde 409 "ya registrada".
+  const created = await tx.user.create({
+    data: {
+      phone,
+      email,
+      name: input.name?.trim().slice(0, 200) || 'Nuevo Cliente',
+      role: 'CUSTOMER',
+      password: await hashPassword(generateTemporaryPassword()),
+    },
+  });
 
-    return {
-      customer: created,
-      assignedAgentId: null,
-      normalizedPhone: phone,
-      normalizedEmail: email,
-      isNewCustomer: true,
-    };
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const existing = await findCustomerByCheckoutContact(phone, email, tx);
-
-      if (existing) {
-        return {
-          customer: existing,
-          assignedAgentId: existing.assignedAgentId,
-          normalizedPhone: phone,
-          normalizedEmail: email,
-          isNewCustomer: false,
-        };
-      }
-    }
-
-    throw error;
-  }
+  return {
+    customer: created,
+    assignedAgentId: null,
+    normalizedPhone: phone,
+    normalizedEmail: email,
+    isNewCustomer: true,
+  };
 }
 
 export interface SessionUserRef {

@@ -9,6 +9,7 @@
 
 import { Prisma } from '@prisma/client';
 import { db } from './db';
+import { canonicalColombiaPhone } from './phone';
 
 // =====================
 // ADVISORY LOCKS DE IDENTIDAD (disciplina global)
@@ -17,14 +18,18 @@ import { db } from './db';
 /**
  * Advisory locks de identidad (pg_advisory_xact_lock): serializan TODO camino
  * que crea/adquiere/transfiere carritos u órdenes de una identidad guest o de
- * usuario. Orden global de locks en TODA transacción:
- *   1) advisory(guest-session) -> 2) advisory(user-cart) -> 3) filas Order -> 4) filas Cart
+ * usuario, y el alta/enlace del cliente de checkout. Orden global de locks en
+ * TODA transacción:
+ *   1) advisory(guest-session) -> 2) advisory(user-cart) -> 3) filas Order
+ *   -> 4) filas Cart -> 5) advisory(contacto email → teléfono, HOJA: solo checkout)
  * Son re-entrantes dentro de la misma transacción y se liberan al cerrarla.
  *
  * Tomados SIEMPRE como primeras sentencias de la tx y en orden relativo fijo
  * guest→user cuando ambos aplican: ningún lock de fila se toma antes que los
  * advisories, así ningún titular de fila puede esperar por un advisory de otra
- * tx (no hay ciclos mixtos fila↔advisory).
+ * tx (no hay ciclos mixtos fila↔advisory). El advisory de contacto es la
+ * excepción documentada: lo toma el checkout DESPUÉS de su lock de Cart y no
+ * espera por nada ajeno después (ver lockCheckoutContactIdentity).
  */
 export async function lockGuestSessionIdentity(
   tx: Prisma.TransactionClient,
@@ -42,6 +47,43 @@ export async function lockUserCartIdentity(
 ) {
   if (!userId) return;
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('compusum:user-cart:' || ${userId}, 0)) IS NULL`;
+}
+
+/**
+ * Advisory locks de CONTACTO de checkout: serializan el alta/enlace del
+ * cliente (upsertCheckoutCustomer) para un mismo contacto canónico.
+ *
+ * Claves canónicas estables: email en minúsculas y teléfono colombiano
+ * `57XXXXXXXXXX` (`canonicalColombiaPhone`); la canonicalización se aplica
+ * AQUÍ (idempotente) para que ningún llamador con input crudo pueda partir la
+ * clave y reabrir la carrera. Cada parte presente toma SU lock, SIEMPRE en
+ * orden fijo email → teléfono, así dos checkouts que comparten partes
+ * distintas no pueden formar un ABBA entre contactos.
+ *
+ * Posición en el orden global (HOJA):
+ *   guest-session → user-cart → filas Order → filas Cart → contacto(email → teléfono)
+ * Solo `upsertCheckoutCustomer` toma locks de contacto, y lo hace DESPUÉS de
+ * que el checkout ya aseguró la fila de su propio Cart; tras el lock de
+ * contacto la tx SOLO inserta filas nuevas (Order/OrderStatusHistory) y
+ * escribe el Cart que ya tiene bloqueado. Ninguna otra transacción (transfer,
+ * reorder, save/clear) espera por un lock de contacto, y un titular de
+ * contacto no espera por filas ajenas: no existen ciclos mixtos
+ * fila↔advisory ni ABBA entre contactos.
+ */
+export async function lockCheckoutContactIdentity(
+  tx: Prisma.TransactionClient,
+  contact: { email: string | null; phone: string | null }
+) {
+  // Canonicalización defensiva idempotente: email normalizado ya canónico no
+  // cambia; el teléfono en cualquiera de sus formas canónica 57XXXXXXXXXX.
+  const email = contact.email?.trim().toLowerCase() || null;
+  const phone = canonicalColombiaPhone(contact.phone);
+  if (email) {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('compusum:contact-email:' || ${email}, 0)) IS NULL`;
+  }
+  if (phone) {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('compusum:contact-phone:' || ${phone}, 0)) IS NULL`;
+  }
 }
 
 /**
