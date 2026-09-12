@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import { isValidOrderStatus } from "@/lib/order-status";
+import { assertQuoteShareable, CommercialOrderError } from "@/lib/commercial-order";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -129,12 +130,24 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       try {
         updated = await db.$transaction(async (tx) => {
           const locked = await tx.$queryRaw<
-            { id: string; status: string; requestType: string }[]
+            { id: string; status: string; requestType: string; agentId: string | null }[]
           >`
-            SELECT id, status, "requestType" FROM "Order" WHERE id = ${id} FOR UPDATE`;
+            SELECT id, status, "requestType", "agentId" FROM "Order" WHERE id = ${id} FOR UPDATE`;
 
           // Deleted between the initial read and the lock.
           if (!locked || locked.length === 0) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                { success: false, error: "Pedido no encontrado" },
+                { status: 404 }
+              )
+            );
+          }
+
+          // AGENT ownership is re-checked on the LOCKED row: the pre-lock
+          // read can be stale if the order was reassigned in between.
+          // Fail-closed 404 (no existence leak), zero writes.
+          if (isAgentRole(user!.role) && locked[0].agentId !== user!.id) {
             throw new OrderPatchAbort(
               NextResponse.json(
                 { success: false, error: "Pedido no encontrado" },
@@ -159,27 +172,20 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
           }
 
           // Commercial guard: an incomplete quote (any line without a
-          // positive price) must never be shared or confirmed.
-          if (
-            locked[0].requestType === "cotizacion" &&
-            (status === "compartido" || status === "recibido")
-          ) {
-            const quoteItems = await tx.orderItem.findMany({
-              where: { orderId: id },
-              select: { unitPrice: true },
-            });
-            if (quoteItems.some((item) => item.unitPrice == null || item.unitPrice <= 0)) {
+          // positive price) must never be shared or confirmed. Shared
+          // implementation with the manual webhook route.
+          try {
+            await assertQuoteShareable(tx, id, status);
+          } catch (guardError) {
+            if (guardError instanceof CommercialOrderError && guardError.status === 400) {
               throw new OrderPatchAbort(
                 NextResponse.json(
-                  {
-                    success: false,
-                    error:
-                      "La cotización tiene líneas sin precio y no puede compartirse o recibirse",
-                  },
+                  { success: false, error: guardError.message },
                   { status: 400 }
                 )
               );
             }
+            throw guardError;
           }
 
           const result = await tx.order.update({

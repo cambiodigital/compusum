@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireAdminApi } from "@/lib/auth";
 import { sendToWebhook, buildWebhookPayload } from "@/lib/webhook";
+import { assertQuoteShareable, CommercialOrderError } from "@/lib/commercial-order";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -19,6 +20,23 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const payload = await buildWebhookPayload(id);
     if (!payload) {
       return NextResponse.json({ success: false, error: "Pedido no encontrado" }, { status: 404 });
+    }
+
+    // The status only flips to "compartido" from "solicitado" (and only on a
+    // successful webhook), so that is the would-be target. Guard BEFORE any
+    // send or write: an incomplete quote never leaves through this endpoint.
+    const targetStatusEffective =
+      payload.status === "solicitado" ? "compartido" : payload.status;
+    try {
+      await assertQuoteShareable(db, id, targetStatusEffective);
+    } catch (guardError) {
+      if (guardError instanceof CommercialOrderError && guardError.status === 400) {
+        return NextResponse.json(
+          { success: false, error: guardError.message },
+          { status: 400 }
+        );
+      }
+      throw guardError;
     }
 
     const result = await sendToWebhook(payload);

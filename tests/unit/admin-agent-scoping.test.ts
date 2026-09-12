@@ -21,7 +21,7 @@ const mockDb = vi.hoisted(() => ({
   // alterar ninguna aserción existente de este archivo.
   $transaction: vi.fn(async (cb: (tx: unknown) => unknown) => cb(mockDb)),
   $queryRaw: vi.fn().mockResolvedValue([
-    { id: 'order-a', status: 'solicitado', requestType: 'pedido' },
+    { id: 'order-a', status: 'solicitado', requestType: 'pedido', agentId: 'agent-a' },
   ]),
   user: {
     findMany: vi.fn(),

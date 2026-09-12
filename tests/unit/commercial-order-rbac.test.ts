@@ -744,6 +744,38 @@ describe('Legacy PATCH /api/admin/orders/[id] — regresiones 4A intactas', () =
     expect(state.items.get('quote-a')![0].unitPrice).toBeNull();
   });
 
+  it('AGENT: ownership re-autorizada POST-lock (fila lockeada con agentId ajeno) => 404 y CERO writes', async () => {
+    authState.currentUser = AGENT_A;
+    const state = makeState();
+    seedBaseFixtures(state);
+    installDb(state);
+
+    // Simula la carrera: el findFirst PRE-lock pasa (order-a es de agent-a
+    // en el estado), pero la fila lockeada devuelve un agentId ajeno.
+    mockDb.$queryRaw.mockImplementation(async () => [
+      { id: 'order-a', status: 'solicitado', requestType: 'pedido', agentId: 'agent-b' },
+    ]);
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/order-a', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'recibido' }),
+      }),
+      idParams('order-a')
+    );
+    const json = await res.json();
+
+    expect(res.status).toBe(404);
+    expect(json).toEqual({ success: false, error: 'Pedido no encontrado' });
+
+    // CERO writes: la transacción aborta antes de tocar el pedido.
+    expect(mockDb.order.update).not.toHaveBeenCalled();
+    expect(mockDb.orderStatusHistory.create).not.toHaveBeenCalled();
+    expect(state.orders.get('order-a')!.status).toBe('solicitado');
+    expect(state.history).toHaveLength(0);
+  });
+
   it('ADMIN: cambio de estado sobre cotización COMPLETA => permitido con historial post-lock', async () => {
     authState.currentUser = ADMIN;
     const state = makeState();

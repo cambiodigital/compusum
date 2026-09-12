@@ -277,6 +277,41 @@ export function authorizeCommercialAccess(
 }
 
 /**
+ * Share guard shared by the admin PATCH status change and the manual webhook
+ * route: a "cotizacion" with any line lacking a positive price must never be
+ * shared ("compartido") or confirmed ("recibido"). Silent no-op for any other
+ * target status and for missing orders (the caller's own 404 handling stays
+ * authoritative). Throws CommercialOrderError (400) on an incomplete quote.
+ */
+export async function assertQuoteShareable(
+  client: DbClient,
+  orderId: string,
+  targetStatus: string
+): Promise<void> {
+  if (targetStatus !== "compartido" && targetStatus !== "recibido") {
+    return;
+  }
+
+  const order = await client.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, requestType: true },
+  });
+  if (!order || order.requestType !== "cotizacion") {
+    return;
+  }
+
+  const items = await client.orderItem.findMany({
+    where: { orderId },
+    select: { unitPrice: true },
+  });
+  if (items.some((item) => item.unitPrice == null || item.unitPrice <= 0)) {
+    throw badRequest(
+      "La cotización tiene líneas sin precio y no puede compartirse o recibirse"
+    );
+  }
+}
+
+/**
  * Loads the order with items and authorizes the actor (404 fail-closed for
  * AGENT on foreign orders). Read path only — no lock, no writes.
  */
