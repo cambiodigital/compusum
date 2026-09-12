@@ -53,9 +53,16 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    // El historial de pedidos sigue al ASESOR dueño por diseño: tras una
+    // reasignación, el AGENT solo ve los pedidos creados bajo SU propiedad.
+    // Los carritos activos del cliente NO se filtran por asesor (no tienen
+    // dueño comercial); el agregado de gasto sí, coherente con los pedidos.
+    const agentOrderScope = agent
+      ? { customerId: id, agentId: user!.id }
+      : { customerId: id };
     const [orders, carts, aggregates] = await Promise.all([
       db.order.findMany({
-        where: { customerId: id },
+        where: agentOrderScope,
         orderBy: { createdAt: "desc" },
         take: 20,
         select: {
@@ -74,7 +81,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
         select: { id: true, uuid: true, subtotal: true, updatedAt: true, _count: { select: { items: true } } },
       }),
       db.order.aggregate({
-        where: { customerId: id },
+        where: agentOrderScope,
         _count: { _all: true },
         _sum: { subtotal: true },
       }),

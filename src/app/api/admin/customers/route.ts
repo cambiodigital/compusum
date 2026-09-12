@@ -81,8 +81,14 @@ export async function GET(request: NextRequest) {
       _count: { _all: true },
       _sum: { subtotal: true },
     });
+    // El historial de pedidos sigue al ASESOR dueño por diseño: tras una
+    // reasignación del cliente, el AGENT solo ve pedidos creados bajo SU
+    // propiedad (el maestro de clientes sigue a la asignación vigente).
     const lastOrders = await db.order.findMany({
-      where: { customerId: { in: customerIds } },
+      where: {
+        customerId: { in: customerIds },
+        ...(agent ? { agentId: user!.id } : {}),
+      },
       orderBy: { createdAt: "desc" },
       select: { customerId: true, orderNumber: true, createdAt: true },
       distinct: ["customerId"],

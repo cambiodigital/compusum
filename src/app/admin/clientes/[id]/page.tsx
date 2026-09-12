@@ -69,19 +69,26 @@ export default async function AdminCustomerDetailPage({ params }: Props) {
 
   if (!customer) notFound();
 
+  // El historial de pedidos sigue al ASESOR dueño por diseño: tras una
+  // reasignación, el AGENT solo ve pedidos creados bajo SU propiedad
+  // (misma política que GET /api/admin/customers/[id]).
+  const agentOrderScope = isAgent
+    ? { customerId: id, agentId: user.id }
+    : { customerId: id };
+
   const [agents, profiles, orders, stats] = await Promise.all([
     // Capacidad global-admin: el AGENT no necesita roster de asesores ni
     // perfiles de precio (su formulario los oculta).
     isAgent ? Promise.resolve([]) : listActiveAgents(),
     isAgent ? Promise.resolve([]) : listActivePriceProfiles(),
     db.order.findMany({
-      where: { customerId: id },
+      where: agentOrderScope,
       orderBy: { createdAt: "desc" },
       take: 10,
       select: { id: true, orderNumber: true, status: true, subtotal: true, createdAt: true },
     }),
     db.order.aggregate({
-      where: { customerId: id },
+      where: agentOrderScope,
       _count: { _all: true },
       _sum: { subtotal: true },
     }),

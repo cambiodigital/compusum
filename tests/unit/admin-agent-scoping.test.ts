@@ -177,6 +177,16 @@ describe('GET /api/admin/customers — alcance por asesor', () => {
         where: expect.objectContaining({ customer: { assignedAgentId: 'agent-a' } }),
       })
     );
+    // El historial (último pedido por cliente) sigue al ASESOR dueño: tras una
+    // reasignación, el AGENT no ve pedidos creados bajo otro asesor.
+    expect(mockDb.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          customerId: { in: [] },
+          agentId: 'agent-a',
+        }),
+      })
+    );
   });
 
   it('AGENT: NO ve clientes de otro asesor aunque el where lo pidiera', async () => {
@@ -271,6 +281,39 @@ describe('GET/PATCH/DELETE /api/admin/customers/[id]', () => {
     expect(mockDb.user.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ id: 'cust-a', assignedAgentId: 'agent-a' }),
+      })
+    );
+    // El historial y el gasto del detalle siguen al ASESOR dueño por diseño:
+    // pedidos creados bajo otro asesor no aparecen tras una reasignación.
+    expect(mockDb.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { customerId: 'cust-a', agentId: 'agent-a' },
+      })
+    );
+    expect(mockDb.order.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { customerId: 'cust-a', agentId: 'agent-a' },
+      })
+    );
+  });
+
+  it('admin: GET detalle SIN agentId en las consultas de pedidos', async () => {
+    authState.currentUser = ADMIN;
+    mockDb.user.findFirst.mockResolvedValueOnce({ id: 'cust-b' });
+    mockDb.order.findMany.mockResolvedValue([]);
+    mockDb.cart.findMany.mockResolvedValue([]);
+    mockDb.order.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { subtotal: 0 } });
+
+    const res = await customerGET(req('http://localhost/api/admin/customers/cust-b'), idParams('cust-b'));
+    expect(res.status).toBe(200);
+    expect(mockDb.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { customerId: 'cust-b' },
+      })
+    );
+    expect(mockDb.order.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { customerId: 'cust-b' },
       })
     );
   });
