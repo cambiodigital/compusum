@@ -171,10 +171,11 @@ describe('GET /api/admin/customers — alcance por asesor', () => {
         where: expect.objectContaining({ role: 'CUSTOMER', assignedAgentId: 'agent-a' }),
       })
     );
-    // Defensa en profundidad: las métricas de pedidos también quedan scoped.
+    // Defensa en profundidad: las métricas de pedidos siguen al ASESOR dueño,
+    // coherente con lastOrders (solo pedidos creados bajo su propiedad).
     expect(mockDb.order.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ customer: { assignedAgentId: 'agent-a' } }),
+        where: expect.objectContaining({ agentId: 'agent-a' }),
       })
     );
     // El historial (último pedido por cliente) sigue al ASESOR dueño: tras una

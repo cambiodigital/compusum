@@ -70,13 +70,14 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Métricas complementarias de pedidos (agregado por customerId).
-    // AGENT: restringidas además a clientes propios (defensa en profundidad).
+    // AGENT: siguen al ASESOR dueño (coherente con lastOrders) — tras una
+    // reasignación, solo cuentan pedidos creados bajo su propiedad.
     const customerIds = customers.map((c) => c.id);
     const orderAggregates = await db.order.groupBy({
       by: ["customerId"],
       where: {
         customerId: { in: customerIds },
-        ...(agent ? { customer: { assignedAgentId: user!.id } } : {}),
+        ...(agent ? { agentId: user!.id } : {}),
       },
       _count: { _all: true },
       _sum: { subtotal: true },
