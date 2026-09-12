@@ -1,21 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdminApi } from "@/lib/auth";
+import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import { generateOrderNumber, createOrderTransactionWithRetry } from "@/lib/order-number";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+// POST duplica un pedido existente. AGENT: solo puede duplicar SUS pedidos
+// (404 idéntico si no lo es); la copia conserva agentId (= self).
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
 
-    const order = await db.order.findUnique({
-      where: { id },
+    const order = await db.order.findFirst({
+      where: isAgentRole(user!.role) ? { id, agentId: user!.id } : { id },
       include: { items: true },
     });
 

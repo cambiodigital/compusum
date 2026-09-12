@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdminApi } from "@/lib/auth";
+import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import {
   updateCustomerAccount,
   deleteCustomerAccount,
@@ -12,15 +12,22 @@ interface RouteParams {
 }
 
 // GET /api/admin/customers/[id] - detalle del cliente + actividad
+// AGENT: solo clientes con assignedAgentId = self (404 idéntico si no es
+// propio, sin filtrar existencia).
 export async function GET(_request: NextRequest, { params }: RouteParams) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
+    const agent = isAgentRole(user!.role);
 
     const customer = await db.user.findFirst({
-      where: { id, role: "CUSTOMER" },
+      where: {
+        id,
+        role: "CUSTOMER",
+        ...(agent ? { assignedAgentId: user!.id } : {}),
+      },
       select: {
         id: true,
         name: true,
@@ -92,13 +99,51 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
 }
 
 // PATCH /api/admin/customers/[id] - editar cliente / asesor / perfil / activo
+// AGENT: solo clientes propios (404 si no) y SOLO datos comerciales seguros;
+// assignedAgentId, priceProfileId, password, isActive, role, etc. jamás se
+// aplican. admin/editor sin cambios.
+const AGENT_EDITABLE_FIELDS = [
+  "name",
+  "email",
+  "phone",
+  "company",
+  "taxId",
+  "address",
+  "city",
+  "notes",
+] as const;
+
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
     const body = await request.json();
+
+    if (isAgentRole(user!.role)) {
+      const own = await db.user.findFirst({
+        where: { id, role: "CUSTOMER", assignedAgentId: user!.id },
+        select: { id: true },
+      });
+      if (!own) {
+        return NextResponse.json(
+          { success: false, error: "Cliente no encontrado" },
+          { status: 404 }
+        );
+      }
+      const scopedBody: Record<string, unknown> = {};
+      for (const field of AGENT_EDITABLE_FIELDS) {
+        if (body[field] !== undefined) scopedBody[field] = body[field];
+      }
+      const customer = await updateCustomerAccount(id, scopedBody);
+      return NextResponse.json({
+        success: true,
+        data: customer,
+        message: "Cliente actualizado exitosamente",
+      });
+    }
+
     const customer = await updateCustomerAccount(id, body);
 
     return NextResponse.json({
@@ -124,12 +169,36 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 }
 
 // DELETE /api/admin/customers/[id] - solo clientes sin pedidos
+// Capacidad global-admin: el AGENT recibe 403 en clientes propios y 404 en
+// los ajenos (sin filtrar existencia). admin/editor sin cambios.
 export async function DELETE(_request: NextRequest, { params }: RouteParams) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
+
+    if (isAgentRole(user!.role)) {
+      const own = await db.user.findFirst({
+        where: { id, role: "CUSTOMER", assignedAgentId: user!.id },
+        select: { id: true },
+      });
+      if (!own) {
+        return NextResponse.json(
+          { success: false, error: "Cliente no encontrado" },
+          { status: 404 }
+        );
+      }
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Acceso denegado: se requiere rol administrativo",
+          code: "FORBIDDEN",
+        },
+        { status: 403 }
+      );
+    }
+
     await deleteCustomerAccount(id);
 
     return NextResponse.json({ success: true, message: "Cliente eliminado" });
