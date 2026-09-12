@@ -136,6 +136,7 @@ import { POST as importPOST } from '@/app/api/admin/import/route';
 
 const AGENT_A = { id: 'agent-a', name: 'Agente A', email: 'a@test.com', role: 'AGENT' };
 const ADMIN = { id: 'admin-1', name: 'Admin', email: 'admin@test.com', role: 'admin' };
+const EDITOR = { id: 'editor-1', name: 'Editor', email: 'e@test.com', role: 'editor' };
 const CUSTOMER_USER = { id: 'cust-1', name: 'Cliente', email: 'c@test.com', role: 'CUSTOMER' };
 
 function req(url: string, init?: RequestInit): NextRequest {
@@ -537,6 +538,82 @@ describe('GET/PATCH/DELETE /api/admin/orders/[id]', () => {
     expect(mockDb.orderStatusHistory.create).toHaveBeenCalled();
   });
 
+  it('AGENT: PATCH own order with `items` (manipulated unitPrice) => 403 with ZERO writes', async () => {
+    authState.currentUser = AGENT_A;
+    // NO findFirst mock queued on purpose: the guard must reject before any
+    // database access, so nothing should consume (or need) a lookup here.
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/order-a', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          items: [
+            { productId: 'p1', productName: 'Prod', quantity: 1, unitPrice: 1 },
+          ],
+        }),
+      }),
+      idParams('order-a')
+    );
+    const json = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(json.code).toBe('FORBIDDEN');
+    // Zero OrderItem operations and zero order update: the rejection happens
+    // BEFORE any database access (not even the ownership lookup).
+    expect(mockDb.order.findFirst).not.toHaveBeenCalled();
+    expect(mockDb.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(mockDb.orderItem.createMany).not.toHaveBeenCalled();
+    expect(mockDb.order.update).not.toHaveBeenCalled();
+  });
+
+  it('AGENT: PATCH with `items: []` (mere presence of the key) => 403', async () => {
+    authState.currentUser = AGENT_A;
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/order-a', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: [] }),
+      }),
+      idParams('order-a')
+    );
+
+    expect(res.status).toBe(403);
+    expect(mockDb.orderItem.deleteMany).not.toHaveBeenCalled();
+    expect(mockDb.orderItem.createMany).not.toHaveBeenCalled();
+  });
+
+  it('admin: PATCH with `items` keeps the legacy replace flow (delete+create+subtotal)', async () => {
+    authState.currentUser = ADMIN;
+    mockDb.order.findFirst.mockResolvedValueOnce({ id: 'order-b', agentId: 'agent-b', status: 'solicitado' });
+    mockDb.orderItem.deleteMany.mockResolvedValue({ count: 1 });
+    mockDb.orderItem.createMany.mockResolvedValue({ count: 1 });
+    mockDb.order.update.mockResolvedValue({ id: 'order-b', items: [] });
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/order-b', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          items: [
+            { productId: 'p1', productName: 'Prod', quantity: 2, unitPrice: 999 },
+          ],
+        }),
+      }),
+      idParams('order-b')
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockDb.orderItem.deleteMany).toHaveBeenCalledWith({ where: { orderId: 'order-b' } });
+    expect(mockDb.orderItem.createMany).toHaveBeenCalledTimes(1);
+    expect(mockDb.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ subtotal: 1998 }),
+      })
+    );
+  });
+
   it('AGENT: DELETE propio => 403 (operación destructiva global)', async () => {
     authState.currentUser = AGENT_A;
     mockDb.order.findFirst.mockResolvedValueOnce({ id: 'order-a' });
@@ -574,24 +651,19 @@ describe('POST /api/admin/orders/[id]/duplicate', () => {
 
     const res = await duplicatePOST(req('http://localhost/api/admin/orders/order-b/duplicate', { method: 'POST' }), idParams('order-b'));
     expect(res.status).toBe(404);
+    expect(mockDb.order.create).not.toHaveBeenCalled();
   });
 
-  it('AGENT: duplicar pedido propio 200 y la copia conserva agentId = self', async () => {
+  it('AGENT: duplicating OWN order => 403 with zero Order.create calls', async () => {
     authState.currentUser = AGENT_A;
-    mockDb.order.findFirst.mockResolvedValueOnce({
-      id: 'order-a',
-      agentId: 'agent-a',
-      items: [{ productId: 'p1', productName: 'Prod', productSku: null, quantity: 1, unitPrice: 1000 }],
-    });
-    mockDb.order.create.mockResolvedValue({ id: 'order-new', agentId: 'agent-a' });
+    mockDb.order.findFirst.mockResolvedValueOnce({ id: 'order-a', agentId: 'agent-a' });
 
     const res = await duplicatePOST(req('http://localhost/api/admin/orders/order-a/duplicate', { method: 'POST' }), idParams('order-a'));
-    expect(res.status).toBe(200);
-    expect(mockDb.order.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ agentId: 'agent-a', status: 'solicitado' }),
-      })
-    );
+    const json = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(json.code).toBe('FORBIDDEN');
+    expect(mockDb.order.create).not.toHaveBeenCalled();
   });
 
   it('admin: duplica pedidos de cualquier asesor sin cambios', async () => {
@@ -605,6 +677,25 @@ describe('POST /api/admin/orders/[id]/duplicate', () => {
 
     const res = await duplicatePOST(req('http://localhost/api/admin/orders/order-b/duplicate', { method: 'POST' }), idParams('order-b'));
     expect(res.status).toBe(200);
+  });
+
+  it('editor: duplication still succeeds unchanged', async () => {
+    authState.currentUser = EDITOR;
+    mockDb.order.findFirst.mockResolvedValueOnce({
+      id: 'order-b',
+      agentId: 'agent-b',
+      items: [{ productId: 'p1', productName: 'Prod', productSku: null, quantity: 1, unitPrice: 1000 }],
+    });
+    mockDb.order.create.mockResolvedValue({ id: 'order-new', agentId: 'agent-b' });
+
+    const res = await duplicatePOST(req('http://localhost/api/admin/orders/order-b/duplicate', { method: 'POST' }), idParams('order-b'));
+
+    expect(res.status).toBe(200);
+    expect(mockDb.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ agentId: 'agent-b', status: 'solicitado' }),
+      })
+    );
   });
 });
 

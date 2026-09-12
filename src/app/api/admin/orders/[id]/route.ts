@@ -39,8 +39,28 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
-    const { id } = await params;
     const body = await request.json();
+
+    // AGENT must never mutate order lines or prices: any body carrying the
+    // `items` key (even an empty array or null) is rejected BEFORE any
+    // database access. Admin/editor keep the legacy items replacement.
+    if (
+      isAgentRole(user!.role) &&
+      body !== null &&
+      typeof body === "object" &&
+      "items" in body
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Acceso denegado: se requiere rol administrativo",
+          code: "FORBIDDEN",
+        },
+        { status: 403 }
+      );
+    }
+
+    const { id } = await params;
     const { status, note, items, customerName, customerEmail, customerPhone, customerCompany, cityId, routeId } = body;
 
     // AGENT: solo pedidos propios (404 idéntico si no lo es).

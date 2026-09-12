@@ -47,8 +47,8 @@ interface OrderAdminActionsProps {
   customerPhone?: string | null;
   customerCompany?: string | null;
   /**
-   * Vista AGENT comercial: oculta webhook y eliminación (capacidades
-   * global-admin que el API rechaza con 403).
+   * Agent (commercial) view: hides webhook, duplication and deletion
+   * (admin/editor capabilities the API rejects with 403).
    */
   agentView?: boolean;
 }
@@ -331,17 +331,19 @@ export function OrderAdminActions({
             </DialogContent>
           </Dialog>
 
-          {/* Duplicate */}
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full gap-2"
-            onClick={handleDuplicate}
-            disabled={duplicating}
-          >
-            <Copy className="h-3.5 w-3.5" />
-            {duplicating ? "Duplicando..." : "Duplicar pedido"}
-          </Button>
+          {/* Duplicate (admin/editor only; hidden in agent view) */}
+          {!agentView && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full gap-2"
+              onClick={handleDuplicate}
+              disabled={duplicating}
+            >
+              <Copy className="h-3.5 w-3.5" />
+              {duplicating ? "Duplicando..." : "Duplicar pedido"}
+            </Button>
+          )}
 
           {!agentView && (
             <AlertDialog>

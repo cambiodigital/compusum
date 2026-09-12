@@ -7,8 +7,9 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-// POST duplica un pedido existente. AGENT: solo puede duplicar SUS pedidos
-// (404 idéntico si no lo es); la copia conserva agentId (= self).
+// POST duplicates an existing order (admin/editor capability). AGENT:
+// ownership first (404 identical when not owned, without leaking existence),
+// then 403; duplication never creates an order for AGENT in this phase.
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { error, user } = await requireBackofficeApi();
@@ -16,8 +17,28 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     const { id } = await params;
 
+    // Duplication is an admin/editor operation: AGENT gets 403 on its own
+    // orders and 404 on foreign ones (existence not leaked), never a write.
+    if (isAgentRole(user!.role)) {
+      const own = await db.order.findFirst({
+        where: { id, agentId: user!.id },
+        select: { id: true },
+      });
+      if (!own) {
+        return NextResponse.json({ success: false, error: "Pedido no encontrado" }, { status: 404 });
+      }
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Acceso denegado: se requiere rol administrativo",
+          code: "FORBIDDEN",
+        },
+        { status: 403 }
+      );
+    }
+
     const order = await db.order.findFirst({
-      where: isAgentRole(user!.role) ? { id, agentId: user!.id } : { id },
+      where: { id },
       include: { items: true },
     });
 
