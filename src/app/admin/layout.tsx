@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser, isAdminRole } from "@/lib/auth";
+import { getCurrentUser, isBackofficeRole } from "@/lib/auth";
 import { AdminLayoutClient } from "@/components/admin/admin-layout-client";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,7 @@ export default async function AdminLayout({
 }) {
   const user = await getCurrentUser();
 
-  if (user && !isAdminRole(user.role)) {
+  if (user && !isBackofficeRole(user.role)) {
     redirect("/admin/login");
   }
 

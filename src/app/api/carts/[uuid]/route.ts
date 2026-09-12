@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { isAgentRole } from "@/lib/roles";
 import { CartValidationError } from "@/lib/cart-validation";
 import { CartMutationError } from "@/lib/order-cart-upsert";
 import { updateCartByUuid } from "@/lib/cart-mutations";
 import {
-  authorizeCartViewer,
+  authorizeCartViewerWithOwner,
   buildSharedCartDTO,
   getCartViewer,
 } from "@/lib/shared-cart";
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     });
 
     const viewer = await getCartViewer(request);
-    const access = authorizeCartViewer(cart, viewer);
+    const access = await authorizeCartViewerWithOwner(cart, viewer);
 
     if (!cart || !access.allowed) {
       return NextResponse.json(
@@ -106,7 +107,10 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     const currentUser = await getCurrentUser();
     const userId = currentUser?.id ?? null;
     const userRole = currentUser?.role ?? null;
-    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
+    // Venta asistida: admin + AGENT (cualquier casing). editor se excluye a
+    // propósito para conservar el comportamiento histórico de esta ruta.
+    const isAdminOrAgent =
+      userRole?.trim().toLowerCase() === "admin" || isAgentRole(userRole);
 
     const isOwner = (existingCart.sessionId && existingCart.sessionId === sessionId) || (userId && existingCart.userId === userId);
 

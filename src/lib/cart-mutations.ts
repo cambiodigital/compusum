@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { isAgentRole } from "./roles";
 import {
   upsertActiveCart,
   lockCartForMutation,
@@ -388,10 +389,11 @@ export async function updateCartByUuid(
     throw new CartMutationError("CART_NOT_FOUND", "Carrito no encontrado", 404);
   }
 
-  // Admin/AGENT (asistidos) pueden modificar carritos de terceros. Se conserva
-  // la comparación histórica EXACTA de la ruta: 'admin' minúscula o 'AGENT'
-  // mayúscula (quirk de caso preservado a propósito).
-  const isAdminOrAgent = viewer.userRole === "admin" || viewer.userRole === "AGENT";
+  // Admin/AGENT (asistidos) pueden modificar carritos de terceros. Comparación
+  // case-insensitive: el role en base de datos tiene casing mixto. editor se
+  // excluye a propósito (misma semántica que la ruta /api/carts/[uuid]).
+  const isAdminOrAgent =
+    viewer.userRole?.trim().toLowerCase() === "admin" || isAgentRole(viewer.userRole);
 
   const itemsProvided = Array.isArray(items);
 

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { verifyPassword, createSession, setSessionCookie, rotateGuestSessionCookie, isAdminRole } from '@/lib/auth';
+import { verifyPassword, createSession, setSessionCookie, rotateGuestSessionCookie, isBackofficeRole } from '@/lib/auth';
 import { transferSessionDataToUser } from '@/lib/checkout';
 import {
   getClientIp,
@@ -83,10 +83,11 @@ export async function POST(request: Request) {
       );
     }
 
-    // Verificar si el usuario está activo y es personal interno: este endpoint
-    // es SOLO para administración (los clientes usan /api/auth/customer/login).
-    // Mismo mensaje para ambos casos (no revelar si la cuenta existe).
-    if (!user.isActive || !isAdminRole(user.role)) {
+    // Verificar si el usuario está activo y es personal de backoffice: este
+    // endpoint es SOLO para el panel /admin (los clientes usan
+    // /api/auth/customer/login). Mismo mensaje para ambos casos (no revelar
+    // si la cuenta existe).
+    if (!user.isActive || !isBackofficeRole(user.role)) {
       await Promise.all([
         recordFailedAttempt(ipKey),
         recordFailedAttempt(emailKey),

@@ -342,9 +342,15 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
   // ---- 2) Carrito ACTIVO del visor (misma semántica que el resto del sitio).
   // Admin/editor/agent pueden asistir ventas sobre carritos de terceros
   // (misma política que authorizeOrderAccess + checkout de venta asistida).
+  // El AGENT comercial solo asiste reordenes de SUS pedidos
+  // (Order.agentId === viewer.id); admin/editor permanecen globales.
   const viewerRole = viewer.user?.role?.toLowerCase() ?? null;
   const isAdminOrAgent =
-    viewerRole === "admin" || viewerRole === "agent" || viewerRole === "editor";
+    viewerRole === "admin" ||
+    viewerRole === "editor" ||
+    (viewerRole === "agent" &&
+      Boolean(viewer.user) &&
+      order.agentId === viewer.user!.id);
 
   const requestedMode =
     options.mode === "add" || options.mode === "replace" ? options.mode : null;
