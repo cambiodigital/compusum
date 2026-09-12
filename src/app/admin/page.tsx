@@ -1,7 +1,8 @@
 import { redirect } from "next/navigation";
-import { requireAdminUser } from "@/lib/auth";
+import { requireBackofficeUser, isAgentRole } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
+import { AgentDashboard } from "@/components/admin/agent-dashboard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,10 +23,50 @@ import {
 } from "lucide-react";
 
 export default async function AdminDashboard() {
-  const user = await requireAdminUser();
+  const user = await requireBackofficeUser();
 
   if (!user) {
     redirect("/admin/login");
+  }
+
+  // AGENT comercial: SOLO métricas de sus clientes y sus pedidos.
+  if (isAgentRole(user!.role)) {
+    const [customersCount, ordersCount, statusStats, recentOrders] = await Promise.all([
+      db.user.count({ where: { role: "CUSTOMER", assignedAgentId: user!.id } }),
+      db.order.count({ where: { agentId: user!.id } }),
+      db.order.groupBy({
+        by: ["status"],
+        where: { agentId: user!.id },
+        _count: { _all: true },
+      }),
+      db.order.findMany({
+        where: { agentId: user!.id },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+        select: {
+          id: true,
+          orderNumber: true,
+          customerName: true,
+          status: true,
+          subtotal: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const ordersByStatus = Object.fromEntries(
+      statusStats.map((s) => [s.status, s._count._all])
+    );
+
+    return (
+      <AgentDashboard
+        userName={user!.name}
+        customersCount={customersCount}
+        ordersCount={ordersCount}
+        ordersByStatus={ordersByStatus}
+        recentOrders={recentOrders}
+      />
+    );
   }
 
   // Fetch statistics

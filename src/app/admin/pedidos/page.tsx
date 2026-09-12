@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireBackofficeUser, isAgentRole } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent } from "@/components/ui/card";
@@ -23,16 +23,20 @@ interface Props {
   searchParams: Promise<{ status?: string; page?: string }>;
 }
 
+// PEDIDOS: el AGENT comercial SOLO ve sus pedidos (agentId = self),
+// incluidos los contadores por estado.
 export default async function AdminPedidosPage({ searchParams }: Props) {
-  const user = await getCurrentUser();
+  const user = await requireBackofficeUser();
   if (!user) redirect("/admin/login");
 
+  const isAgent = isAgentRole(user.role);
   const params = await searchParams;
   const page = parseInt(params.page || "1");
   const limit = 20;
 
   const where: Record<string, unknown> = {};
   if (params.status) where.status = params.status;
+  if (isAgent) where.agentId = user.id;
 
   const [orders, total, stats] = await Promise.all([
     db.order.findMany({
@@ -48,6 +52,7 @@ export default async function AdminPedidosPage({ searchParams }: Props) {
     db.order.count({ where }),
     db.order.groupBy({
       by: ["status"],
+      where: isAgent ? { agentId: user.id } : {},
       _count: { _all: true },
     }),
   ]);
