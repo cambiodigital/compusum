@@ -9,6 +9,11 @@ import { Button } from "@/components/ui/button";
 import { OrderStatusBadge } from "@/components/admin/order-status-badge";
 import { OrderTimeline } from "@/components/admin/order-timeline";
 import { OrderAdminActions } from "@/components/admin/order-admin-actions";
+import { CommercialOrderPanel } from "@/components/admin/commercial-order-panel";
+import {
+  buildCommercialPreview,
+  type CommercialPreview,
+} from "@/lib/commercial-order";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -46,6 +51,21 @@ export default async function AdminOrderDetailPage({ params }: Props) {
   });
 
   if (!order) notFound();
+
+  // Commercial calculation preview (Fase 4B): direct lib call, same read
+  // pattern as the rest of this page. The order ownership was already
+  // enforced by the query above, so this should not fail; if it ever does,
+  // the panel is skipped gracefully and the page still renders.
+  let commercialPreview: CommercialPreview | null = null;
+  try {
+    commercialPreview = await buildCommercialPreview(order.id, {
+      id: user.id,
+      role: user.role,
+      name: user.name,
+    });
+  } catch {
+    commercialPreview = null;
+  }
 
   const isCotizacion = order.requestType === "cotizacion";
 
@@ -156,6 +176,15 @@ export default async function AdminOrderDetailPage({ params }: Props) {
             agentView={isAgentRole(user.role)}
           />
         </div>
+
+        {/* Commercial calculation (Fase 4B) */}
+        {commercialPreview && (
+          <CommercialOrderPanel
+            orderId={order.id}
+            initialPreview={commercialPreview}
+            agentView={isAgentRole(user.role)}
+          />
+        )}
 
         {/* Products */}
         <Card>
