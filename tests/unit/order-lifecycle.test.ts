@@ -159,8 +159,12 @@ describe('createOrderFromCart: cada checkout crea un pedido NUEVO', () => {
       sessionId: 'sess-1',
     });
 
-    expect(txShared.$queryRaw).toHaveBeenCalledTimes(1);
-    const sql = txShared.$queryRaw.mock.calls[0][0];
+    // Checkout guest: advisory lock de identidad PRIMERO, luego el lock del
+    // carrito (orden global advisory→fila).
+    expect(txShared.$queryRaw).toHaveBeenCalledTimes(2);
+    const advisorySql = txShared.$queryRaw.mock.calls[0][0];
+    expect(String(advisorySql)).toContain('pg_advisory_xact_lock');
+    const sql = txShared.$queryRaw.mock.calls[1][0];
     expect(String(sql)).toContain('FOR UPDATE');
   });
 

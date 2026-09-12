@@ -12,6 +12,7 @@ import { validateAndPriceItems, CartValidationError } from "./cart-validation";
 import { resolveServerPricingCustomer } from "./pricing";
 import { generateOrderNumber, createOrderTransactionWithRetry } from "./order-number";
 import { isValidRequestType, type RequestType } from "./order-status";
+import { lockGuestSessionIdentity } from "./order-cart-upsert";
 
 /**
  * SEMÁNTICA FASE 3 — Cart vs Order.
@@ -161,6 +162,15 @@ export async function createOrderFromCart(
   // El pedido se crea DENTRO de la transacción que bloquea el carrito: la
   // creación y la conversión del carrito son atómicas frente a dobles submits.
   const order = await createOrderTransactionWithRetry(async (tx) => {
+    // 0) Advisory lock de identidad (SOLO checkout guest): primera sentencia
+    //    de la tx; serializa este checkout contra la transferencia
+    //    invitado→cuenta de la misma sesión (si la transferencia confirma
+    //    primero, el re-chequeo de propiedad de abajo falla 403 y NO se crea
+    //    pedido). No-op para checkouts autenticados.
+    if (sessionUser == null && sessionId != null) {
+      await lockGuestSessionIdentity(tx, sessionId);
+    }
+
     // 1) Lock pesimista del carrito: serializa checkouts concurrentes del
     //    mismo carrito. El segundo espera, relee el estado y falla abajo.
     await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${input.cartId} FOR UPDATE`;

@@ -51,6 +51,26 @@ const viewerFor = (order: { customerId: string | null; sessionId: string | null 
     ? { user: { id: order.customerId, role: 'CUSTOMER' }, sessionId: null }
     : { user: null, sessionId: order.sessionId };
 
+// Barrera determinista: espera a que la víctima esté REALMENTE bloqueada en
+// el lock (wait_event_type='Lock') antes de que el controller escriba.
+async function waitForVictimLocked(
+  client: PrismaClient,
+  queryFragment: string,
+  timeoutMs = 8000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.$queryRaw<{ count: bigint }[]>`
+      SELECT count(*) AS count FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND query ILIKE ${'%' + queryFragment + '%'}
+        AND pid <> pg_backend_pid()`;
+    if (Number(rows[0].count) > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('La víctima nunca llegó al lock wait: ' + queryFragment);
+}
+
 async function seedHistoricalOrder(opts: {
   suffix: string;
   status: string;
@@ -213,6 +233,7 @@ d('CARRERA DE ESTADO: lock FOR UPDATE + re-chequeo => 409 y cero writes', async 
     // 1) El controlador toma el lock de la fila ANTES de lanzar la edición.
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Order"');
       // 2) La edición arranca mientras el lock está tomado: su lectura
       //    inicial ve 'solicitado' pero se BLOQUEA en el FOR UPDATE interno.
       // 3) Con la edición esperando, el controlador cambia el estado y libera.
@@ -333,6 +354,7 @@ d('STALE READS: la promoción re-precia las líneas confirmadas por B bajo el lo
     // la edición concurrente B conservando el estado 'solicitado'.
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Order"');
       await new Promise((r) => setTimeout(r, 400));
       await tx.orderItem.deleteMany({ where: { orderId: order.id } });
       await tx.orderItem.createMany({
@@ -422,6 +444,7 @@ d('OWNERSHIP POST-LOCK: transferencia guest→CUSTOMER bajo el lock => 403 y cer
   try {
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Order"');
       await new Promise((r) => setTimeout(r, 400));
       // Lo que transferSessionDataToUser escribe al transferir propiedad.
       await tx.order.update({

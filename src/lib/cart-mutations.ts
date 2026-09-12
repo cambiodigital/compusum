@@ -2,6 +2,8 @@ import { db } from "./db";
 import {
   upsertActiveCart,
   lockCartForMutation,
+  lockGuestSessionIdentity,
+  lockUserCartIdentity,
   CartMutationError,
   type CartMutationViewer,
   type LockedCartSnapshot,
@@ -86,8 +88,16 @@ export async function saveCartChanges(
   // acción requiere al menos un producto (mismo 400 que la ruta histórica).
   if (!itemsArray || itemsArray.length === 0) {
     if (action === "save" || action === "clear") {
-      const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, cityId);
       return db.$transaction(async (tx) => {
+        // Advisory locks de identidad: SIEMPRE primeras sentencias de la tx,
+        // en orden global guest→user (no-op con identidad null). Serializan
+        // esta adquisición contra transferencias y otros adquirentes.
+        await lockGuestSessionIdentity(tx, viewer.sessionId);
+        await lockUserCartIdentity(tx, viewer.userId);
+
+        // Adquisición DENTRO de la tx (disciplina de advisory locks): la
+        // exclusión de creadores concurrentes la dan los advisories.
+        const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, cityId, tx);
         await lockCartForMutation(tx, cart.id, viewer);
         await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
         const updated = await tx.cart.update({
@@ -106,9 +116,15 @@ export async function saveCartChanges(
 
   // Con items: resolver el carrito activo y escribir todo en UNA tx bajo el
   // lock (validación de precios incluida: los precios se leen bajo el lock).
-  const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, cityId);
-
   return db.$transaction(async (tx) => {
+    // Advisory locks de identidad: SIEMPRE primeras sentencias de la tx,
+    // en orden global guest→user (no-op con identidad null).
+    await lockGuestSessionIdentity(tx, viewer.sessionId);
+    await lockUserCartIdentity(tx, viewer.userId);
+
+    // Adquisición DENTRO de la tx (disciplina de advisory locks).
+    const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, cityId, tx);
+
     // Única disciplina: lock + re-lectura autoritativa + re-check de
     // status/ownership antes de escribir líneas/subtotal/metadata.
     await lockCartForMutation(tx, cart.id, viewer);
@@ -298,6 +314,11 @@ export async function clearActiveCarts(
   }
 
   await db.$transaction(async (tx) => {
+    // Advisory locks de identidad: SIEMPRE primeras sentencias de la tx,
+    // en orden global guest→user (no-op con identidad null).
+    await lockGuestSessionIdentity(tx, sessionId);
+    await lockUserCartIdentity(tx, userId);
+
     await lockCartForMutation(tx, cart.id, { sessionId, userId, isAdminOrAgent });
     await tx.cartItem.deleteMany({
       where: { cartId: cart.id },

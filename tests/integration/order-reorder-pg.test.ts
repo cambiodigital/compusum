@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { db } from '@/lib/db';
 import { reorderOrderItems, ReorderError } from '@/lib/order-reorder';
+import { upsertActiveCart } from '@/lib/order-cart-upsert';
 
 /**
  * FASE 3 — REORDER contra PostgreSQL REAL.
@@ -17,6 +18,9 @@ import { reorderOrderItems, ReorderError } from '@/lib/order-reorder';
  * 5. Carrito convertido durante la espera del lock: el convertido queda
  *    EXACTAMENTE intacto y el reorder aterriza en el carrito activo actual
  *    (1 reintento acotado).
+ * 6. Edición concurrente del pedido bajo el lock del Order: el contenido del
+ *    reorder proviene SIEMPRE de las líneas post-lock (re-evaluación), nunca
+ *    de la lectura stale previa a la tx.
  *
  * Aislamiento: el visor es CUSTOMER, así que `upsertActiveCart` resuelve el
  * carrito por userId; cada test expira su carrito al terminar para que el
@@ -80,6 +84,26 @@ async function seedHistoricalOrder(suffix: string, quantity: number) {
 }
 
 const viewer = () => ({ user: { id: customerId, role: 'CUSTOMER' }, sessionId: null });
+
+// Barrera determinista: espera a que la víctima esté REALMENTE bloqueada en
+// el lock (wait_event_type='Lock') antes de que el controller escriba.
+async function waitForVictimLocked(
+  client: PrismaClient,
+  queryFragment: string,
+  timeoutMs = 8000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.$queryRaw<{ count: bigint }[]>`
+      SELECT count(*) AS count FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND query ILIKE ${'%' + queryFragment + '%'}
+        AND pid <> pg_backend_pid()`;
+    if (Number(rows[0].count) > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('La víctima nunca llegó al lock wait: ' + queryFragment);
+}
 
 beforeAll(async () => {
   if (!HAS_POSTGRES) return;
@@ -203,6 +227,7 @@ d('replace con error tras el lock: el carrito anterior se conserva', async () =>
     // DESACTIVA el producto: el estado final (post-lock) ya no es válido.
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Cart"');
       await new Promise((r) => setTimeout(r, 400));
       await tx.product.update({ where: { id: productId }, data: { isActive: false } });
     });
@@ -274,6 +299,99 @@ d('lost update: el reorder combina contra las líneas FRESCAS (post-lock)', asyn
   }
 }, 30000);
 
+d('edición concurrente del pedido bajo el lock => el reorder carga las líneas POST-lock, jamás las viejas', async () => {
+  // Pedido 'solicitado' con P×2 @10000 + carrito activo VACÍO del cliente.
+  const histCart = await db.cart.create({
+    data: { sessionId: `sess-hist-${RUN}-postlock`, status: 'convertido' },
+  });
+  const order = await db.order.create({
+    data: {
+      orderNumber: `CS-REORDER-${RUN}-postlock`,
+      cartId: histCart.id,
+      customerId,
+      subtotal: 2 * 10000,
+      status: 'solicitado',
+      items: {
+        create: {
+          productId,
+          productName: 'Producto reorder',
+          quantity: 2,
+          unitPrice: 10000,
+        },
+      },
+    },
+    include: { items: true },
+  });
+
+  // Carrito activo VACÍO del cliente (upsert canónico sin tx de prueba).
+  const cart = await upsertActiveCart(null, customerId);
+  expect(cart.items).toHaveLength(0);
+
+  let landedCartId: string | null = null;
+  const other = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
+  try {
+    // Controlador: lock del Order, espera y commitea la edición concurrente
+    // (B): líneas P×7 + Q×1 con snapshot @null, manteniendo 'solicitado'.
+    const controller = other.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Order"');
+      await new Promise((r) => setTimeout(r, 400));
+      await tx.orderItem.deleteMany({ where: { orderId: order.id } });
+      await tx.orderItem.createMany({
+        data: [
+          { orderId: order.id, productId, productName: 'Producto reorder', quantity: 7, unitPrice: null },
+          { orderId: order.id, productId: qProductId, productName: 'Producto Q', quantity: 1, unitPrice: null },
+        ],
+      });
+      await tx.order.update({
+        where: { id: order.id },
+        data: { subtotal: 7 * 10000 + 1 * 5000 },
+      });
+    });
+
+    // A +150ms el reorder lee AFUERA (P×2 viejas) y se bloquea en el lock
+    // del Order; al entrar re-lee las líneas BAJO el lock (P×7 + Q×1).
+    await new Promise((r) => setTimeout(r, 150));
+    const resultPromise = reorderOrderItems({
+      orderId: order.id,
+      viewer: viewer(),
+      mode: 'add',
+      allowPartial: true,
+    });
+
+    await controller;
+    const result = await resultPromise;
+    landedCartId = result.cart!.id;
+
+    // Las líneas del carrito son EXACTAMENTE las post-edicición, a precio
+    // ACTUAL (8000/5000) — JAMÁS las P×2 stale.
+    expect(landedCartId).toBe(cart.id); // carrito activo ya existente (vacío)
+    const lines = await db.cartItem.findMany({ where: { cartId: cart.id } });
+    const byProduct = new Map(lines.map((l) => [l.productId, l]));
+    expect(lines).toHaveLength(2);
+    expect(byProduct.get(productId)!.quantity).toBe(7);
+    expect(byProduct.get(productId)!.unitPrice).toBe(8000);
+    expect(byProduct.get(qProductId)!.quantity).toBe(1);
+    expect(byProduct.get(qProductId)!.unitPrice).toBe(5000);
+    expect(result.cart!.subtotal).toBe(7 * 8000 + 1 * 5000);
+
+    // La respuesta refleja las líneas nuevas (7 y 1), no las stale (2).
+    const byReport = new Map(result.items.map((i) => [i.productId, i]));
+    expect(result.items).toHaveLength(2);
+    expect(byReport.get(productId)!.quantity).toBe(7);
+    expect(byReport.get(productId)!.status).toBe('added');
+    expect(byReport.get(productId)!.currentUnitPrice).toBe(8000);
+    expect(byReport.get(qProductId)!.quantity).toBe(1);
+    expect(byReport.get(qProductId)!.status).toBe('added');
+  } finally {
+    await other.$disconnect();
+    await db.cart.updateMany({
+      where: { id: { in: [cart.id, landedCartId].filter((id): id is string => Boolean(id)) } },
+      data: { status: 'expirado' },
+    });
+  }
+}, 30000);
+
 d('checkout convierte el carrito durante la espera del lock => convertido EXACTAMENTE intacto y reorder en carrito NUEVO', async () => {
   // El checkout (controlador) convierte el carrito mientras el reorder
   // espera el lock: NO se escribe nada sobre el convertido (su línea de 2 ×
@@ -287,6 +405,7 @@ d('checkout convierte el carrito durante la espera del lock => convertido EXACTA
   try {
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Cart"');
       await new Promise((r) => setTimeout(r, 400));
       // Exactamente lo que el checkout canónico escribe al convertir.
       await tx.cart.update({

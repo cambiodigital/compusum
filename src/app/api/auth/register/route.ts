@@ -31,25 +31,31 @@ export async function POST(req: NextRequest) {
     try {
       const result = await registerCustomer({ name, email, phone, password, company, taxId });
 
-      await resetRateLimit(ipKey);
-      await setSessionCookie(result.token, SESSION_DURATION_HOURS_DEFAULT * 60 * 60);
-
-      // Transferencia atómica guest→cuenta. La rotación del guest session SOLO
-      // ocurre si la transferencia tuvo éxito: si falla, la sesión guest conserva
-      // acceso a su carrito/pedidos (sin estados inaccesibles).
+      // Handoff PRIMERO: si la transferencia guest→cuenta falla, NO se publica
+      // la cookie de sesión, NO se rota la guest y NO se resetea el rate limit.
+      // La cuenta persiste INTENCIONALMENTE (sin compensación destructiva):
+      // sin sesión publicada, la sesión guest conserva acceso a sus datos y
+      // el login posterior completa el handoff.
       const sessionId = req.headers.get('x-session-id');
-      let handoffOk = true;
       if (sessionId && result.user?.id) {
         try {
           await transferSessionDataToUser(sessionId, result.user.id);
         } catch (e) {
-          handoffOk = false;
           console.error('Error transfiriendo sesión al usuario:', e);
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                'Tu cuenta fue creada, pero no pudimos vincular tu sesión de invitado. Inicia sesión para continuar.',
+            },
+            { status: 500 }
+          );
         }
       }
-      if (handoffOk) {
-        await rotateGuestSessionCookie();
-      }
+
+      await resetRateLimit(ipKey);
+      await setSessionCookie(result.token, SESSION_DURATION_HOURS_DEFAULT * 60 * 60);
+      await rotateGuestSessionCookie();
 
       return NextResponse.json({
         success: true,

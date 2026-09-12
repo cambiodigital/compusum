@@ -10,6 +10,40 @@
 import { Prisma } from '@prisma/client';
 import { db } from './db';
 
+// =====================
+// ADVISORY LOCKS DE IDENTIDAD (disciplina global)
+// =====================
+
+/**
+ * Advisory locks de identidad (pg_advisory_xact_lock): serializan TODO camino
+ * que crea/adquiere/transfiere carritos u órdenes de una identidad guest o de
+ * usuario. Orden global de locks en TODA transacción:
+ *   1) advisory(guest-session) -> 2) advisory(user-cart) -> 3) filas Order -> 4) filas Cart
+ * Son re-entrantes dentro de la misma transacción y se liberan al cerrarla.
+ *
+ * Tomados SIEMPRE como primeras sentencias de la tx y en orden relativo fijo
+ * guest→user cuando ambos aplican: ningún lock de fila se toma antes que los
+ * advisories, así ningún titular de fila puede esperar por un advisory de otra
+ * tx (no hay ciclos mixtos fila↔advisory).
+ */
+export async function lockGuestSessionIdentity(
+  tx: Prisma.TransactionClient,
+  sessionId: string | null | undefined
+) {
+  if (!sessionId) return;
+  // `IS NULL` convierte el void del lock en una columna serializable por
+  // Prisma ($queryRaw no deserializa columnas void, P2010).
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('compusum:guest-session:' || ${sessionId}, 0)) IS NULL`;
+}
+
+export async function lockUserCartIdentity(
+  tx: Prisma.TransactionClient,
+  userId: string | null | undefined
+) {
+  if (!userId) return;
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('compusum:user-cart:' || ${userId}, 0)) IS NULL`;
+}
+
 /**
  * Obtiene o crea un carrito activo basado en userId o sessionId.
  *
@@ -23,6 +57,11 @@ import { db } from './db';
  * @param cityId - City ID opcional
  * @param client - Cliente Prisma (global `db` o `tx` de una transacción)
  * @returns El carrito existente o uno nuevo
+ *
+ * NOTA de disciplina: todos los adquirentes llaman esta función DENTRO de una
+ * transacción que ya tomó los advisory locks de identidad (save/clear/reorder/
+ * transfer); la adquisición y la escritura subsecuente comparten destino y
+ * exclusión. No hay recuperación P2002: una violación residual aborta la tx.
  */
 export async function upsertActiveCart(
   sessionId: string | null | undefined,
@@ -57,25 +96,18 @@ export async function upsertActiveCart(
 
     // Crear carrito para este usuario (sin sessionId: la sesión rotable no
     // participa en la identidad de los carritos de usuario)
-    try {
-      return await client.cart.create({
-        data: {
-          userId,
-          status: 'activo',
-          cityId: cityId || null,
-        },
-        include: { items: true },
-      });
-    } catch (e: any) {
-      if (e?.code === 'P2002') {
-        // Race condition: another concurrent request already created this cart
-        return await client.cart.findFirstOrThrow({
-          where: { userId, status: 'activo' },
-          include: { items: true },
-        });
-      }
-      throw e;
-    }
+    // La exclusión la garantizan los advisory locks de identidad tomados por
+    // todos los adquirentes (save/clear/reorder/transfer); un P2002 residual
+    // aborta la tx limpiamente para retry del llamador — NUNCA se consulta
+    // sobre una tx abortada.
+    return await client.cart.create({
+      data: {
+        userId,
+        status: 'activo',
+        cityId: cityId || null,
+      },
+      include: { items: true },
+    });
   }
 
   // Invitado: la sesión rotable identifica el carrito guest.
@@ -93,25 +125,17 @@ export async function upsertActiveCart(
     }
 
     // Crear carrito para esta sesión
-    try {
-      return await client.cart.create({
-        data: {
-          sessionId,
-          status: 'activo',
-          cityId: cityId || null,
-        },
-        include: { items: true },
-      });
-    } catch (e: any) {
-      if (e?.code === 'P2002') {
-        // Race condition: another concurrent request already created this cart
-        return await client.cart.findFirstOrThrow({
-          where: { sessionId, status: 'activo' },
-          include: { items: true },
-        });
-      }
-      throw e;
-    }
+    // Mismo criterio que la rama de usuario: los advisory locks de identidad
+    // excluyen adquirentes concurrentes; un P2002 residual aborta la tx sin
+    // consultas de recuperación sobre una transacción abortada.
+    return await client.cart.create({
+      data: {
+        sessionId,
+        status: 'activo',
+        cityId: cityId || null,
+      },
+      include: { items: true },
+    });
   }
 
   // Fallback
@@ -270,18 +294,19 @@ export async function transferSessionCartToUserTx(
 ) {
   if (!sessionId) return null;
 
-  // Encontrar carrito activo con sessionId
-  const sessionCart = await tx.cart.findFirst({
-    where: {
-      sessionId,
-      status: 'activo',
-    },
-  });
+  // Lock PREDICADO del carrito activo de la sesión (SELECT ... FOR UPDATE con
+  // la condición completa, no findFirst-then-lock): cierra la ventana en la
+  // que un checkout concurrente convertía la fila entre la lectura y el lock.
+  const locked = await tx.$queryRaw<{ id: string; status: string; sessionId: string | null }[]>`
+    SELECT id, status, "sessionId" FROM "Cart"
+    WHERE "sessionId" = ${sessionId} AND status = 'activo'
+    ORDER BY id FOR UPDATE`;
+  if (!locked || locked.length === 0) return null;
+  const cart = locked[0];
 
-  if (!sessionCart) return null;
-
-  // Lock de la fila del carrito antes de transferirla (orden global Order→Cart).
-  await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${sessionCart.id} FOR UPDATE`;
+  // Revalidación post-lock: la fila debe seguir siendo el carrito activo de
+  // esta sesión (defensa en profundidad sobre el snapshot bloqueado).
+  if (cart.sessionId !== sessionId || cart.status !== 'activo') return null;
 
   // Expirar carritos activos previos del usuario (preserva históricos, no borra).
   // La exclusión por id evita que una forma legada (pre-20260312) con sessionId
@@ -291,7 +316,7 @@ export async function transferSessionCartToUserTx(
     where: {
       userId,
       status: 'activo',
-      id: { not: sessionCart.id },
+      id: { not: cart.id },
     },
     data: {
       status: 'expirado',
@@ -300,7 +325,7 @@ export async function transferSessionCartToUserTx(
 
   // Transferir el carrito de sesión al usuario
   return await tx.cart.update({
-    where: { id: sessionCart.id },
+    where: { id: cart.id },
     data: {
       userId,
       sessionId: null, // Desvincularlo de la sesión

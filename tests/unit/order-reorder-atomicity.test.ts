@@ -83,11 +83,16 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
         state.inTx = false;
       }
     }),
-    // Locks pesimistas DENTRO de la tx, en orden global Order→Cart:
-    // 1) SELECT ... FROM "Order" ... FOR UPDATE (reautorización autoritativa)
-    // 2) lockCartForMutation (SELECT ... FOR UPDATE del Cart)
+    // Locks pesimistas DENTRO de la tx, en orden global advisory→Order→Cart:
+    // 1) advisory de identidad (pg_advisory_xact_lock)
+    // 2) SELECT ... FROM "Order" ... FOR UPDATE (reautorización autoritativa)
+    // 3) lockCartForMutation (SELECT ... FOR UPDATE del Cart)
     $queryRaw: vi.fn().mockImplementation((sql?: unknown) => {
       const text = String(sql);
+      if (text.includes('pg_advisory_xact_lock')) {
+        ops.push({ op: 'lock-advisory', inTx: state.inTx });
+        return Promise.resolve([]);
+      }
       const isOrderLock = text.includes('FROM "Order"');
       ops.push({ op: isOrderLock ? 'lock-order' : 'lock', inTx: state.inTx });
       if (isOrderLock) {
@@ -105,6 +110,9 @@ function makeDb(opts: { order?: any; cart?: any; cartItems?: any[]; product?: an
       updateMany: vi.fn(),
     },
     orderItem: {
+      // Re-lectura de líneas del pedido BAJO el lock del Order (BLOCK 3):
+      // por defecto coincide con el contenido pre-tx (fast-path).
+      findMany: vi.fn().mockResolvedValue(opts.order?.items ?? []),
       deleteMany: vi.fn(),
       createMany: vi.fn(),
     },
@@ -255,11 +263,14 @@ describe('reorderOrderItems: atomicidad de la escritura', () => {
 
     await run();
 
-    // Locks con FOR UPDATE: primero el Order (reautorización) y luego el
-    // carrito (disciplina de mutación) — orden global Order→Cart.
-    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
-    const orderLockSql = String((db.$queryRaw as any).mock.calls[0][0]);
-    const cartLockSql = String((db.$queryRaw as any).mock.calls[1][0]);
+    // Locks: primero el advisory de identidad (userId del visor), luego el
+    // Order (reautorización) y por último el carrito — orden global
+    // advisory(guest→user) → Order → Cart.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(3);
+    const advisorySql = String((db.$queryRaw as any).mock.calls[0][0]);
+    const orderLockSql = String((db.$queryRaw as any).mock.calls[1][0]);
+    const cartLockSql = String((db.$queryRaw as any).mock.calls[2][0]);
+    expect(advisorySql).toContain('pg_advisory_xact_lock');
     expect(orderLockSql).toContain('FROM "Order"');
     expect(orderLockSql).toContain('FOR UPDATE');
     expect(cartLockSql).toContain('FOR UPDATE');
@@ -270,10 +281,13 @@ describe('reorderOrderItems: atomicidad de la escritura', () => {
     const reads = ops.filter((o) => o.op === 'cartItem.findMany');
     expect(reads.length).toBe(1);
     expect(reads[0].inTx).toBe(true); // re-lectura dentro de la tx
+    const advisoryIdx = ops.findIndex((o) => o.op === 'lock-advisory');
     const orderLockIdx = ops.findIndex((o) => o.op === 'lock-order');
     const lockIdx = ops.findIndex((o) => o.op === 'lock');
     const freshReadIdx = ops.findIndex((o) => o.op === 'cartItem.findMany' && o.inTx);
-    expect(orderLockIdx).toBeGreaterThanOrEqual(0);
+    expect(advisoryIdx).toBeGreaterThanOrEqual(0);
+    expect(ops[advisoryIdx]).toBe(ops[0]); // advisory SIEMPRE primera sentencia
+    expect(orderLockIdx).toBeGreaterThan(advisoryIdx); // advisory ANTES que Order
     expect(lockIdx).toBeGreaterThan(orderLockIdx); // Order ANTES que Cart
     expect(freshReadIdx).toBeGreaterThan(lockIdx);
   });

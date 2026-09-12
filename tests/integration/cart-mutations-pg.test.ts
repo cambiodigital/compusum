@@ -93,6 +93,26 @@ const customerViewer = () => ({
   isAdminOrAgent: false,
 });
 
+// Barrera determinista: espera a que la víctima esté REALMENTE bloqueada en
+// el lock (wait_event_type='Lock') antes de que el controller escriba.
+async function waitForVictimLocked(
+  client: PrismaClient,
+  queryFragment: string,
+  timeoutMs = 8000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.$queryRaw<{ count: bigint }[]>`
+      SELECT count(*) AS count FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND query ILIKE ${'%' + queryFragment + '%'}
+        AND pid <> pg_backend_pid()`;
+    if (Number(rows[0].count) > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('La víctima nunca llegó al lock wait: ' + queryFragment);
+}
+
 beforeAll(async () => {
   if (!HAS_POSTGRES) return;
 
@@ -474,6 +494,7 @@ d('T8: transferencia de propiedad bajo el lock => save del guest recibe 403 y ce
   try {
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Cart"');
       await new Promise((r) => setTimeout(r, 400));
       await tx.cart.update({
         where: { id: cart.id },
@@ -522,6 +543,7 @@ d('T9: PUT sobre carrito convertido bajo el lock => 409 determinístico y conver
   try {
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Cart"');
       await new Promise((r) => setTimeout(r, 400));
       // Conversión canónica de checkout.
       await tx.cart.update({
@@ -572,6 +594,7 @@ d('T10: transferencia de propiedad bajo el lock => clear del guest recibe 403 y 
   try {
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Cart" WHERE id = ${cart.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Cart"');
       await new Promise((r) => setTimeout(r, 400));
       await tx.cart.update({
         where: { id: cart.id },

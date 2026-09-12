@@ -1,10 +1,17 @@
 import { db } from "./db";
+import { Prisma } from "@prisma/client";
 import { validateAndPriceItems, CartValidationError } from "./cart-validation";
 import {
   resolvePricesForItems,
   type PricingCustomerContext,
 } from "./pricing";
-import { upsertActiveCart, lockCartForMutation, CartMutationError } from "./order-cart-upsert";
+import {
+  upsertActiveCart,
+  lockCartForMutation,
+  lockGuestSessionIdentity,
+  lockUserCartIdentity,
+  CartMutationError,
+} from "./order-cart-upsert";
 import {
   authorizeOrderAccess,
   OrderAccessError,
@@ -26,10 +33,13 @@ import {
  *   solo los disponibles requiere `allowPartial` (confirmación explícita).
  *
  * ATOMICIDAD: toda la fase de escritura ocurre dentro de UNA transacción que
- * comienza con el lock del Order y su reautorización autoritativa (orden
- * global de locks Order→Cart; si el pedido fue transferido a una cuenta en
- * pleno vuelo, el guest recibe 403 con CERO writes y sin crear carrito),
- * continúa con el lock pesimista del carrito (`SELECT ... FOR UPDATE`, mismo
+ * comienza con el advisory lock de identidad (guest o userId del visor, ver
+ * `order-cart-upsert.ts`), continúa con el lock del Order y su reautorización
+ * autoritativa (orden global de locks Order→Cart; si el pedido fue transferido
+ * a una cuenta en pleno vuelo, el guest recibe 403 con CERO writes y sin crear
+ * carrito), re-lee las líneas del pedido BAJO el lock (si una edición
+ * concurrente cambió el contenido, se re-evalúa contra las líneas post-lock)
+ * y sigue con el lock pesimista del carrito (`SELECT ... FOR UPDATE`, mismo
  * patrón que `createOrderFromCart`) y la re-lectura FRESCA de sus líneas: el
  * estado final se valida ANTES de destruir el carrito anterior. Si la
  * validación combinada falla y `allowPartial` es falso, se aborta con 409 y
@@ -124,6 +134,51 @@ interface FinalLine {
   existingQuantity: number | null;
 }
 
+/** Línea fuente del reorder (forma mínima de OrderItem usada por la evaluación). */
+interface ReorderSourceLine {
+  productId: string;
+  variantId: string | null;
+  productName: string;
+  variantName: string | null;
+  quantity: number;
+  unitPrice: number | null;
+}
+
+/** Resultado de evaluar líneas del pedido contra el estado ACTUAL del catálogo. */
+interface ItemEvaluation {
+  itemResults: ReorderItemResult[];
+  loadable: ReorderItemResult[];
+  blockedCount: number;
+  /** true si al menos una línea disponible cambió de precio vs el histórico. */
+  priceChanged: boolean;
+}
+
+/**
+ * Mapa de contenido `productId::variantId -> quantity` para comparar el
+ * contenido de dos lecturas de líneas (los ids de orderItem cambian tras una
+ * edición: se compara CONTENIDO, no ids).
+ */
+function lineContentMap(lines: Array<{ productId: string; variantId: string | null; quantity: number }>) {
+  const map = new Map<string, number>();
+  for (const line of lines) {
+    map.set(`${line.productId}::${line.variantId ?? ""}`, line.quantity);
+  }
+  return map;
+}
+
+function sameLineContent(
+  a: Array<{ productId: string; variantId: string | null; quantity: number }>,
+  b: Array<{ productId: string; variantId: string | null; quantity: number }>
+): boolean {
+  const mapA = lineContentMap(a);
+  const mapB = lineContentMap(b);
+  if (mapA.size !== mapB.size) return false;
+  for (const [key, qty] of mapA) {
+    if (mapB.get(key) !== qty) return false;
+  }
+  return true;
+}
+
 export async function reorderOrderItems(options: ReorderOptions): Promise<ReorderResult> {
   const { orderId, viewer } = options;
 
@@ -152,123 +207,137 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
         : null,
   };
 
-  const productIds = Array.from(new Set(order.items.map((i) => i.productId)));
-
-  const products = await db.product.findMany({
-    where: { id: { in: productIds } },
-    select: {
-      id: true,
-      name: true,
-      isActive: true,
-      stockQuantity: true,
-      stockStatus: true,
-      minWholesaleQty: true,
-      variants: {
-        select: { id: true, isActive: true, stockQuantity: true, stockStatus: true },
-      },
-    },
-  });
-
-  const productsById = new Map(products.map((p) => [p.id, p]));
-
-  const { prices } = await resolvePricesForItems(
-    order.items
-      .filter((i) => productsById.has(i.productId))
-      .map((i) => ({ productId: i.productId, variantId: i.variantId })),
-    pricingCtx
-  );
-
   // ---- 1) Evaluación por ítem contra el estado ACTUAL, sin tocar el carrito.
-  const itemResults: ReorderItemResult[] = order.items.map((item) => {
-    const base = {
-      productId: item.productId,
-      variantId: item.variantId,
-      productName: item.productName,
-      variantName: item.variantName,
-      quantity: item.quantity,
-      historicalUnitPrice:
-        item.unitPrice !== null && item.unitPrice !== undefined ? item.unitPrice : null,
-    };
+  // Extraída como función pura (solo lecturas): se ejecuta pre-tx para el
+  // fast-fail y el fast-path "no modificado", y se re-ejecuta BAJO el lock
+  // del Order cuando el contenido de las líneas cambió en plena carrera.
+  const evaluateItems = async (
+    lines: ReorderSourceLine[],
+    client: Prisma.TransactionClient | typeof db = db
+  ): Promise<ItemEvaluation> => {
+    const productIds = Array.from(new Set(lines.map((i) => i.productId)));
 
-    if (!(typeof item.quantity === "number" && Number.isInteger(item.quantity) && item.quantity > 0)) {
-      return { ...base, status: "invalid_quantity" as const, currentUnitPrice: null };
-    }
+    const products = await client.product.findMany({
+      where: { id: { in: productIds } },
+      select: {
+        id: true,
+        name: true,
+        isActive: true,
+        stockQuantity: true,
+        stockStatus: true,
+        minWholesaleQty: true,
+        variants: {
+          select: { id: true, isActive: true, stockQuantity: true, stockStatus: true },
+        },
+      },
+    });
 
-    const product = productsById.get(item.productId);
-    if (!product) {
-      return { ...base, status: "product_removed" as const, currentUnitPrice: null };
-    }
-    if (!product.isActive) {
-      return { ...base, status: "product_inactive" as const, currentUnitPrice: null };
-    }
+    const productsById = new Map(products.map((p) => [p.id, p]));
 
-    const variant = item.variantId
-      ? product.variants.find((v) => v.id === item.variantId)
-      : null;
-    if (item.variantId && !variant) {
-      return { ...base, status: "variant_missing" as const, currentUnitPrice: null };
-    }
-    if (variant && !variant.isActive) {
-      return { ...base, status: "variant_inactive" as const, currentUnitPrice: null };
-    }
+    const { prices } = await resolvePricesForItems(
+      lines
+        .filter((i) => productsById.has(i.productId))
+        .map((i) => ({ productId: i.productId, variantId: i.variantId })),
+      { ...pricingCtx, tx: client }
+    );
 
-    const availableQuantity =
-      (variant ? variant.stockQuantity : product.stockQuantity) ?? 0;
-    const stockStatus = variant ? variant.stockStatus : product.stockStatus;
-
-    const minQty = product.minWholesaleQty || 1;
-    if (item.quantity < minQty) {
-      return {
-        ...base,
-        status: "below_min_qty" as const,
-        currentUnitPrice: null,
-        minQtyRequired: minQty,
-        availableQuantity,
+    const itemResults: ReorderItemResult[] = lines.map((item) => {
+      const base = {
+        productId: item.productId,
+        variantId: item.variantId,
+        productName: item.productName,
+        variantName: item.variantName,
+        quantity: item.quantity,
+        historicalUnitPrice:
+          item.unitPrice !== null && item.unitPrice !== undefined ? item.unitPrice : null,
       };
-    }
 
-    if (stockStatus === "agotado" || availableQuantity <= 0) {
-      return {
-        ...base,
-        status: "exceeds_stock" as const,
-        currentUnitPrice: null,
-        availableQuantity: Math.max(availableQuantity, 0),
-      };
-    }
+      if (!(typeof item.quantity === "number" && Number.isInteger(item.quantity) && item.quantity > 0)) {
+        return { ...base, status: "invalid_quantity" as const, currentUnitPrice: null };
+      }
 
-    if (item.quantity > availableQuantity) {
-      return {
-        ...base,
-        status: "exceeds_stock" as const,
-        currentUnitPrice: null,
-        availableQuantity,
-      };
-    }
+      const product = productsById.get(item.productId);
+      if (!product) {
+        return { ...base, status: "product_removed" as const, currentUnitPrice: null };
+      }
+      if (!product.isActive) {
+        return { ...base, status: "product_inactive" as const, currentUnitPrice: null };
+      }
 
-    // Disponible: precio ACTUAL del motor (null => requiere cotización).
-    const resolved = prices.get(`${item.productId}::${item.variantId || ""}`);
-    const currentUnitPrice =
-      resolved && resolved.unitPrice !== null && resolved.unitPrice > 0
-        ? resolved.unitPrice
+      const variant = item.variantId
+        ? product.variants.find((v) => v.id === item.variantId)
         : null;
+      if (item.variantId && !variant) {
+        return { ...base, status: "variant_missing" as const, currentUnitPrice: null };
+      }
+      if (variant && !variant.isActive) {
+        return { ...base, status: "variant_inactive" as const, currentUnitPrice: null };
+      }
 
-    return {
-      ...base,
-      status: currentUnitPrice === null ? ("requires_quote" as const) : ("added" as const),
-      currentUnitPrice,
-    };
-  });
+      const availableQuantity =
+        (variant ? variant.stockQuantity : product.stockQuantity) ?? 0;
+      const stockStatus = variant ? variant.stockStatus : product.stockStatus;
 
-  const loadable = itemResults.filter((r) => isLoadable(r.status));
-  const blockedCount = itemResults.filter((r) => !isLoadable(r.status)).length;
-  const priceChanged = () =>
-    itemResults.some(
+      const minQty = product.minWholesaleQty || 1;
+      if (item.quantity < minQty) {
+        return {
+          ...base,
+          status: "below_min_qty" as const,
+          currentUnitPrice: null,
+          minQtyRequired: minQty,
+          availableQuantity,
+        };
+      }
+
+      if (stockStatus === "agotado" || availableQuantity <= 0) {
+        return {
+          ...base,
+          status: "exceeds_stock" as const,
+          currentUnitPrice: null,
+          availableQuantity: Math.max(availableQuantity, 0),
+        };
+      }
+
+      if (item.quantity > availableQuantity) {
+        return {
+          ...base,
+          status: "exceeds_stock" as const,
+          currentUnitPrice: null,
+          availableQuantity,
+        };
+      }
+
+      // Disponible: precio ACTUAL del motor (null => requiere cotización).
+      const resolved = prices.get(`${item.productId}::${item.variantId || ""}`);
+      const currentUnitPrice =
+        resolved && resolved.unitPrice !== null && resolved.unitPrice > 0
+          ? resolved.unitPrice
+          : null;
+
+      return {
+        ...base,
+        status: currentUnitPrice === null ? ("requires_quote" as const) : ("added" as const),
+        currentUnitPrice,
+      };
+    });
+
+    const loadable = itemResults.filter((r) => isLoadable(r.status));
+    const blockedCount = itemResults.filter((r) => !isLoadable(r.status)).length;
+    const priceChanged = itemResults.some(
       (r) =>
         isLoadable(r.status) &&
         r.historicalUnitPrice !== null &&
         r.currentUnitPrice !== null &&
         r.currentUnitPrice !== r.historicalUnitPrice
     );
+
+    return { itemResults, loadable, blockedCount, priceChanged };
+  };
+
+  // Evaluación pre-tx: base del fast-path (líneas sin cambios) y del
+  // fast-fail de forma; NUNCA es la fuente de una escritura si el pedido
+  // cambió bajo el lock (ver re-evaluación dentro de la tx).
+  const evaluation = await evaluateItems(order.items, db);
 
   // ---- 2) Carrito ACTIVO del visor (misma semántica que el resto del sitio).
   // Admin/editor/agent pueden asistir ventas sobre carritos de terceros
@@ -290,6 +359,16 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
 
     try {
       return await db.$transaction(async (tx) => {
+        // Advisory locks de identidad: SIEMPRE primeras sentencias de la tx
+        // (antes del lock del Order), en orden global guest→user. El visor
+        // invitado serializa contra la transferencia/checkout de SU sesión;
+        // el autenticado (admin/agent asistiendo incluidos) contra su userId.
+        if (!viewer.user && viewer.sessionId) {
+          await lockGuestSessionIdentity(tx, viewer.sessionId);
+        } else if (viewer.user) {
+          await lockUserCartIdentity(tx, viewer.user.id);
+        }
+
         // a) Lock pesimista del Order y reautorización autoritativa bajo el
         //    lock: si el pedido fue transferido a una cuenta mientras tanto,
         //    el guest recibe 403 y la tx aborta con CERO writes (ni creación
@@ -303,6 +382,20 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
         }
 
         authorizeOrderAccess(lockedOrder[0], viewer);
+
+        // a2) Bajo el lock del Order, el contenido del reorder proviene
+        //     SIEMPRE de las líneas post-lock: nunca se cargan líneas que ya
+        //     no pertenecen al pedido. Si una edición concurrente cambió las
+        //     líneas mientras esperábamos el lock (comparación por contenido
+        //     producto::variante+cantidad, no por ids), se re-evalúa TODO
+        //     (stock/precios/estado ACTUAL) contra el contenido fresco y ese
+        //     resultado gobierna conflictos, bloqueos, líneas finales y
+        //     respuesta. Si el contenido coincide, se conserva la evaluación
+        //     pre-tx (comportamiento idéntico al fast-path).
+        const lockedLines = await tx.orderItem.findMany({ where: { orderId } });
+        const activeEvaluation = sameLineContent(order.items, lockedLines)
+          ? evaluation
+          : await evaluateItems(lockedLines, tx);
 
         // b) Carrito ACTIVO del visor resuelto DENTRO de la tx (después del
         //    lock del Order, misma semántica canónica que el resto del sitio).
@@ -334,20 +427,20 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
         if (freshCartItems.length > 0 && !requestedMode) {
           return {
             conflict: { cartItemCount: freshCartItems.length },
-            items: itemResults,
+            items: activeEvaluation.itemResults,
             addedCount: 0,
-            blockedCount,
-            priceChanged: priceChanged(),
+            blockedCount: activeEvaluation.blockedCount,
+            priceChanged: activeEvaluation.priceChanged,
           };
         }
 
         // f) Defensa en profundidad: bloqueos re-chequeados dentro de la tx.
-        if (blockedCount > 0 && !options.allowPartial) {
+        if (activeEvaluation.blockedCount > 0 && !options.allowPartial) {
           return {
-            items: itemResults,
+            items: activeEvaluation.itemResults,
             addedCount: 0,
-            blockedCount,
-            priceChanged: priceChanged(),
+            blockedCount: activeEvaluation.blockedCount,
+            priceChanged: activeEvaluation.priceChanged,
           };
         }
 
@@ -367,7 +460,7 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
           }
         }
 
-        for (const result of loadable) {
+        for (const result of activeEvaluation.loadable) {
           const key = `${result.productId}::${result.variantId ?? ""}`;
           const existingLine = finalLines.get(key);
           const quantity = (existingLine?.quantity ?? 0) + result.quantity;
@@ -445,14 +538,14 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
             }
 
             const markBlocked = () => {
-              const idx = itemResults.findIndex(
+              const idx = activeEvaluation.itemResults.findIndex(
                 (r) =>
                   r.productId === line.productId &&
                   (r.variantId ?? null) === (line.variantId ?? null)
               );
               if (idx >= 0) {
-                itemResults[idx] = {
-                  ...itemResults[idx],
+                activeEvaluation.itemResults[idx] = {
+                  ...activeEvaluation.itemResults[idx],
                   status: "exceeds_stock",
                   currentUnitPrice: null,
                 };
@@ -502,14 +595,14 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
         });
 
         const finalItemCount = finalLines.size;
-        const finalLoadable = itemResults.filter((r) => isLoadable(r.status));
+        const finalLoadable = activeEvaluation.itemResults.filter((r) => isLoadable(r.status));
 
         return {
-          items: itemResults,
+          items: activeEvaluation.itemResults,
           addedCount: finalLoadable.length,
-          blockedCount: itemResults.filter((r) => !isLoadable(r.status)).length,
+          blockedCount: activeEvaluation.itemResults.filter((r) => !isLoadable(r.status)).length,
           cart: { id: cart.id, uuid: cartRow?.uuid ?? "", itemCount: finalItemCount, subtotal },
-          priceChanged: priceChanged(),
+          priceChanged: activeEvaluation.priceChanged,
         };
       });
     } catch (caught) {

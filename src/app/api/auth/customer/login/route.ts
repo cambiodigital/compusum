@@ -71,23 +71,29 @@ export async function POST(req: NextRequest) {
     };
 
     const completeLogin = async (result: { token: string; user: any }) => {
-      await setSessionCookie(result.token, sessionHours * 60 * 60);
-
-      // Transferencia atómica guest→cuenta. La rotación del guest session SOLO
-      // ocurre si la transferencia tuvo éxito: si falla, la sesión guest conserva
-      // acceso a su carrito/pedidos (sin estados inaccesibles).
-      let handoffOk = true;
+      // Handoff PRIMERO: si la transferencia guest→cuenta falla, NO se publica
+      // la cookie de sesión, NO se rota la guest y NO se resetean los límites
+      // de rate. Publicar sesión sin handoff dejaría al usuario autenticado
+      // con sus datos guest invisibles bajo la cuenta (identidad userId
+      // primero); la sesión guest conserva acceso y puede reintentar.
       if (sessionId && result.user?.id) {
         try {
           await transferSessionDataToUser(sessionId, result.user.id);
         } catch (e) {
-          handoffOk = false;
           console.error('Error transfiriendo sesión al usuario:', e);
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                'No fue posible completar el inicio de sesión. Tus datos como invitado permanecen intactos; intenta de nuevo.',
+            },
+            { status: 500 }
+          );
         }
       }
-      if (handoffOk) {
-        await rotateGuestSessionCookie();
-      }
+
+      await setSessionCookie(result.token, sessionHours * 60 * 60);
+      await rotateGuestSessionCookie();
 
       await resetRateLimit(ipKey);
       if (idKey) await resetRateLimit(idKey);

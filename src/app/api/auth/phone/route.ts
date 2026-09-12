@@ -29,24 +29,31 @@ export async function POST(req: Request) {
       : SESSION_DURATION_HOURS_DEFAULT;
 
     const result = await loginWithPhone(phone, otpCode, sessionHours);
-    await setSessionCookie(result.token, sessionHours * 60 * 60);
 
-    // Transferencia atómica guest→cuenta. La rotación del guest session SOLO
-    // ocurre si la transferencia tuvo éxito: si falla, la sesión guest conserva
-    // acceso a su carrito/pedidos (sin estados inaccesibles).
+    // Handoff PRIMERO: si la transferencia guest→cuenta falla, NO se publica
+    // la cookie de sesión y NO se rota la guest. Publicar sesión sin handoff
+    // dejaría al usuario autenticado con sus datos guest invisibles bajo la
+    // cuenta (identidad userId primero); la sesión guest conserva acceso y
+    // puede reintentar.
     const sessionId = req.headers.get('x-session-id');
-    let handoffOk = true;
     if (sessionId && result.user?.id) {
       try {
         await transferSessionDataToUser(sessionId, result.user.id);
       } catch (e) {
-        handoffOk = false;
         console.error('Error transfiriendo sesión al usuario:', e);
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              'No fue posible completar el inicio de sesión. Tus datos como invitado permanecen intactos; intenta de nuevo.',
+          },
+          { status: 500 }
+        );
       }
     }
-    if (handoffOk) {
-      await rotateGuestSessionCookie();
-    }
+
+    await setSessionCookie(result.token, sessionHours * 60 * 60);
+    await rotateGuestSessionCookie();
 
     // Sanitizado en el borde: NUNCA exponer hash ni datos internos aunque la
     // capa de lib se regrese algún día.

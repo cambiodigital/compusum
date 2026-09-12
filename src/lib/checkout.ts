@@ -6,6 +6,8 @@ import { canonicalColombiaPhone, phoneOrVariants } from './phone';
 import {
   transferSessionCartToUserTx,
   transferSessionOrdersToUserTx,
+  lockGuestSessionIdentity,
+  lockUserCartIdentity,
 } from './order-cart-upsert';
 
 function generateTemporaryPassword(): string {
@@ -240,9 +242,21 @@ export async function findBestRouteForCity(cityId?: string | null, now = new Dat
  * La transferencia es UNA transacción REAL: orden global de locks Order→Cart
  * (los pedidos se bloquean y transfieren primero, luego el carrito) para
  * evitar deadlocks con reorder (Order→Cart) y checkout (Cart).
+ *
+ * Los advisory locks de identidad van PRIMERO (guest→user): serializan esta
+ * transferencia contra el checkout guest de la MISMA sesión (si el checkout
+ * confirma primero, el escaneo de Orders de abajo ve el pedido nuevo y lo
+ * transfiere; si la transferencia confirma primero, el checkout falla 403 en
+ * su re-chequeo de propiedad post-lock) y contra cualquier otra transferencia
+ * concurrente de la misma sesión o del mismo usuario.
  */
 export async function transferSessionDataToUser(sessionId: string, userId: string) {
   return db.$transaction(async (tx) => {
+    // Advisory locks de identidad: SIEMPRE primeras sentencias de la tx,
+    // en orden global guest→user.
+    await lockGuestSessionIdentity(tx, sessionId);
+    await lockUserCartIdentity(tx, userId);
+
     // Orden global: Order ANTES que Cart
     const orders = await transferSessionOrdersToUserTx(tx, sessionId, userId);
     const cart = await transferSessionCartToUserTx(tx, sessionId, userId);

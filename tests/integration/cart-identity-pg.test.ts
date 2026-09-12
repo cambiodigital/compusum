@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { db } from '@/lib/db';
-import { upsertActiveCart } from '@/lib/order-cart-upsert';
+import { upsertActiveCart, lockGuestSessionIdentity, lockUserCartIdentity } from '@/lib/order-cart-upsert';
 import { saveCartChanges, clearActiveCarts } from '@/lib/cart-mutations';
 import { reorderOrderItems } from '@/lib/order-reorder';
 import { transferSessionDataToUser } from '@/lib/checkout';
@@ -106,6 +106,26 @@ async function snapshotSessionFootprint(sessionId: string) {
     include: { items: true },
   });
   return carts;
+}
+
+// Barrera determinista: espera a que la víctima esté REALMENTE bloqueada en
+// el lock (wait_event_type='Lock') antes de que el controller escriba.
+async function waitForVictimLocked(
+  client: PrismaClient,
+  queryFragment: string,
+  timeoutMs = 8000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.$queryRaw<{ count: bigint }[]>`
+      SELECT count(*) AS count FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND query ILIKE ${'%' + queryFragment + '%'}
+        AND pid <> pg_backend_pid()`;
+    if (Number(rows[0].count) > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('La víctima nunca llegó al lock wait: ' + queryFragment);
 }
 
 beforeAll(async () => {
@@ -285,12 +305,19 @@ d('T2: clear y reorder resuelven el MISMO carrito canónico (userId autoritativo
 }, 30000);
 
 d('T3: dos adquisiciones concurrentes para un usuario sin carrito => el MISMO carrito y UN activo', async () => {
-  // U2 NO tiene carrito: dos resoluciones concurrentes con sesiones distintas
-  // ejercitan el reintento P2002 contra el índice único parcial DB-native.
-  const [a, b] = await Promise.all([
-    upsertActiveCart(SESS_CONC_A, userU2Id),
-    upsertActiveCart(SESS_CONC_B, userU2Id),
-  ]);
+  // U2 NO tiene carrito: dos resoluciones concurrentes con sesiones distintas.
+  // Tras la disciplina de advisory locks, la adquisición ocurre DENTRO de una
+  // tx que toma los advisories primero (guest→user) — exactamente lo que
+  // hacen los adquirentes de producción (save/clear/reorder/transfer); ya no
+  // existe recuperación P2002 fuera de esa disciplina.
+  const acquire = (sessionId: string) =>
+    db.$transaction(async (tx) => {
+      await lockGuestSessionIdentity(tx, sessionId);
+      await lockUserCartIdentity(tx, userU2Id);
+      return upsertActiveCart(sessionId, userU2Id, undefined, tx);
+    });
+
+  const [a, b] = await Promise.all([acquire(SESS_CONC_A), acquire(SESS_CONC_B)]);
 
   expect(a.id).toBe(b.id);
 
@@ -317,6 +344,7 @@ d('T4: reorder re-autoriza el Order bajo transferencia concurrente => 403 y CERO
     // (exactamente lo que transferSessionDataToUser escribe al transferir).
     const controller = other.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+      await waitForVictimLocked(other, 'FROM "Order"');
       await new Promise((r) => setTimeout(r, 400));
       await tx.order.update({
         where: { id: order.id },
