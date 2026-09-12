@@ -340,11 +340,13 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
   const evaluation = await evaluateItems(order.items, db);
 
   // ---- 2) Carrito ACTIVO del visor (misma semántica que el resto del sitio).
-  // Admin/editor/agent pueden asistir ventas sobre carritos de terceros
-  // (misma política que authorizeOrderAccess + checkout de venta asistida).
+  // Admin/editor asisten ventas sobre carritos de terceros (authorizeOrderAccess
+  // ya solo los admite a ellos en el portal cliente). El AGENT comercial NO
+  // reordena por esta vía: gestiona SUS pedidos vía el API de backoffice
+  // (/api/admin/orders), no por el portal; authorizeOrderAccess lo rechaza
+  // antes de llegar aquí, así que el bypass es exactamente admin|editor.
   const viewerRole = viewer.user?.role?.toLowerCase() ?? null;
-  const isAdminOrAgent =
-    viewerRole === "admin" || viewerRole === "agent" || viewerRole === "editor";
+  const isStaffViewer = viewerRole === "admin" || viewerRole === "editor";
 
   const requestedMode =
     options.mode === "add" || options.mode === "replace" ? options.mode : null;
@@ -414,7 +416,7 @@ export async function reorderOrderItems(options: ReorderOptions): Promise<Reorde
         await lockCartForMutation(tx, cart.id, {
           sessionId: viewer.sessionId ?? null,
           userId: viewer.user?.id ?? null,
-          isAdminOrAgent,
+          isAdminOrAgent: isStaffViewer,
         });
 
         // d) Lectura FRESCA bajo el lock: única fuente del estado del carrito.

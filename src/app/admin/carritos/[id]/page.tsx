@@ -1,5 +1,5 @@
 import { redirect, notFound } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,7 +37,7 @@ const statusConfig: Record<string, { label: string; className: string }> = {
 };
 
 export default async function AdminCartDetailPage({ params }: Props) {
-  const user = await getCurrentUser();
+  const user = await requireAdminUser();
   if (!user) redirect("/admin/login");
 
   const { id } = await params;

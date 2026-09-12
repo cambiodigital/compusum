@@ -58,7 +58,7 @@ vi.mock('@/lib/auth', () => ({
   getCurrentUser: vi.fn().mockResolvedValue(null),
   requireAdminApi: vi.fn().mockResolvedValue({ error: null, user: { id: 'admin-1', role: 'admin' } }),
   isAdminRole: (role: string | null | undefined) =>
-    ['admin', 'editor', 'agent'].includes(String(role).toLowerCase()),
+    ['admin', 'editor'].includes(String(role).trim().toLowerCase()),
   verifyPassword: vi.fn().mockResolvedValue(true),
   SESSION_DURATION_HOURS_DEFAULT: 24,
   SESSION_DURATION_DAYS_REMEMBER_ME: 30,

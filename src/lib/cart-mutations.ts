@@ -340,6 +340,14 @@ export interface UpdateCartByUuidViewer {
   userId: string | null;
   /** Rol crudo del usuario autenticado (null = invitado). */
   userRole: string | null;
+  /**
+   * Decisión AUTORITATIVA del bypass de staff sobre carritos de TERCEROS,
+   * resuelta por la ruta con `authorizeCartViewerWithOwner` (admin global, o
+   * AGENT solo sobre carritos huérfanos o de SUS clientes asignados). Se
+   * re-enfuerza BAJO el lock: la verificación de la ruta es solo fast-fail.
+   * Dueños (sesión/cuenta) NO usan el bypass: el lock les re-valida propiedad.
+   */
+  staffCanManage: boolean;
 }
 
 export interface UpdateCartByUuidInput {
@@ -388,10 +396,11 @@ export async function updateCartByUuid(
     throw new CartMutationError("CART_NOT_FOUND", "Carrito no encontrado", 404);
   }
 
-  // Admin/AGENT (asistidos) pueden modificar carritos de terceros. Se conserva
-  // la comparación histórica EXACTA de la ruta: 'admin' minúscula o 'AGENT'
-  // mayúscula (quirk de caso preservado a propósito).
-  const isAdminOrAgent = viewer.userRole === "admin" || viewer.userRole === "AGENT";
+  // Bypass de staff para TERCEROS: decisión resuelta por la ruta (admin, o
+  // AGENT con ownership scoped vía authorizeCartViewerWithOwner) y RE-ENFORZADA
+  // en el re-check POST-lock del carrito. editor no tiene bypass; los flujos
+  // de dueño (staffCanManage=false) conservan la verificación de propiedad.
+  const isAdminOrAgent = viewer.staffCanManage;
 
   const itemsProvided = Array.isArray(items);
 

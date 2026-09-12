@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdminApi } from "@/lib/auth";
+import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import { isValidOrderStatus } from "@/lib/order-status";
 
 interface RouteParams {
@@ -9,13 +9,13 @@ interface RouteParams {
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
 
-    const order = await db.order.findUnique({
-      where: { id },
+    const order = await db.order.findFirst({
+      where: isAgentRole(user!.role) ? { id, agentId: user!.id } : { id },
       include: {
         items: true,
         statusHistory: { orderBy: { createdAt: "asc" } },
@@ -36,14 +36,17 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
   try {
-    const { error, user } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
     const body = await request.json();
     const { status, note, items, customerName, customerEmail, customerPhone, customerCompany, cityId, routeId } = body;
 
-    const order = await db.order.findUnique({ where: { id } });
+    // AGENT: solo pedidos propios (404 idéntico si no lo es).
+    const order = await db.order.findFirst({
+      where: isAgentRole(user!.role) ? { id, agentId: user!.id } : { id },
+    });
     if (!order) {
       return NextResponse.json({ success: false, error: "Pedido no encontrado" }, { status: 404 });
     }
@@ -121,10 +124,30 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { id } = await params;
+
+    // Eliminar pedidos es una operación destructiva global-admin: el AGENT
+    // recibe 403 en pedidos propios y 404 en ajenos (sin filtrar existencia).
+    if (isAgentRole(user!.role)) {
+      const own = await db.order.findFirst({
+        where: { id, agentId: user!.id },
+        select: { id: true },
+      });
+      if (!own) {
+        return NextResponse.json({ success: false, error: "Pedido no encontrado" }, { status: 404 });
+      }
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Acceso denegado: se requiere rol administrativo",
+          code: "FORBIDDEN",
+        },
+        { status: 403 }
+      );
+    }
 
     const order = await db.order.findUnique({ where: { id } });
     if (!order) {

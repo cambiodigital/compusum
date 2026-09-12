@@ -63,6 +63,11 @@ interface CustomerFormDialogProps {
   customerId?: string;
   initialValues?: Partial<CustomerFormValues>;
   trigger?: React.ReactNode;
+  /**
+   * Vista AGENT comercial: oculta asesor, perfil de precio, contraseña y
+   * estado de cuenta (el API ignora/forcea esos campos de todos modos).
+   */
+  agentView?: boolean;
 }
 
 /**
@@ -76,6 +81,7 @@ export function CustomerFormDialog({
   customerId,
   initialValues,
   trigger,
+  agentView = false,
 }: CustomerFormDialogProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -107,10 +113,12 @@ export function CustomerFormDialog({
         address: values.address || null,
         city: values.city || null,
         notes: values.notes || null,
-        isActive: values.isActive,
-        assignedAgentId: values.assignedAgentId || null,
-        priceProfileId: values.priceProfileId || null,
       };
+      if (!agentView) {
+        payload.isActive = values.isActive;
+        payload.assignedAgentId = values.assignedAgentId || null;
+        payload.priceProfileId = values.priceProfileId || null;
+      }
       if (values.password) payload.password = values.password;
 
       const res = await fetch(
@@ -210,39 +218,41 @@ export function CustomerFormDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Asesor comercial (AGENT activo)</label>
-              <select
-                value={values.assignedAgentId ?? ""}
-                onChange={update("assignedAgentId")}
-                className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-              >
-                <option value="">Sin asesor</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
-                    {agent.email ? ` (${agent.email})` : ""}
-                  </option>
-                ))}
-              </select>
+          {!agentView && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Asesor comercial (AGENT activo)</label>
+                <select
+                  value={values.assignedAgentId ?? ""}
+                  onChange={update("assignedAgentId")}
+                  className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                >
+                  <option value="">Sin asesor</option>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                      {agent.email ? ` (${agent.email})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Perfil de precio</label>
+                <select
+                  value={values.priceProfileId ?? ""}
+                  onChange={update("priceProfileId")}
+                  className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                >
+                  <option value="">Precio base (sin perfil)</option>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} ({profile.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Perfil de precio</label>
-              <select
-                value={values.priceProfileId ?? ""}
-                onChange={update("priceProfileId")}
-                className="flex h-9 w-full rounded-md border border-slate-200 bg-white px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-              >
-                <option value="">Precio base (sin perfil)</option>
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.name} ({profile.code})
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
+          )}
 
           <div className="space-y-2">
             <label className="text-sm font-medium">Notas internas</label>
@@ -255,7 +265,7 @@ export function CustomerFormDialog({
             />
           </div>
 
-          {mode === "create" && (
+          {mode === "create" && !agentView && (
             <div className="space-y-2">
               <label className="text-sm font-medium">Contraseña inicial (opcional)</label>
               <Input
@@ -269,15 +279,17 @@ export function CustomerFormDialog({
             </div>
           )}
 
-          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={values.isActive}
-              onChange={update("isActive")}
-              className="h-4 w-4 rounded border-slate-300"
-            />
-            Cuenta activa
-          </label>
+          {!agentView && (
+            <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={values.isActive}
+                onChange={update("isActive")}
+                className="h-4 w-4 rounded border-slate-300"
+              />
+              Cuenta activa
+            </label>
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={() => setOpen(false)} disabled={loading}>
@@ -295,18 +307,25 @@ export function CustomerFormDialog({
 }
 
 /** Botón de creación (usado en la lista del maestro). */
-export function CreateCustomerButton() {
-  return <CustomerFormDialogContainer mode="create" />;
+export function CreateCustomerButton({ agentView = false }: { agentView?: boolean }) {
+  return <CustomerFormDialogContainer mode="create" agentView={agentView} />;
 }
 
-// Wrapper que carga agentes/perfiles para el selector al montar
-function CustomerFormDialogContainer({ mode }: { mode: "create" }) {
+// Wrapper que carga agentes/perfiles para el selector al montar.
+// En vista AGENT no consulta form-options (capacidad global-admin).
+function CustomerFormDialogContainer({
+  mode,
+  agentView,
+}: {
+  mode: "create";
+  agentView?: boolean;
+}) {
   const [agents, setAgents] = useState<AgentOption[]>([]);
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (ready) return;
+    if (ready || agentView) return;
     fetch("/api/admin/customers/form-options")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -319,7 +338,14 @@ function CustomerFormDialogContainer({ mode }: { mode: "create" }) {
         // Silencioso: selectores quedarán vacíos
       })
       .finally(() => setReady(true));
-  }, [ready]);
+  }, [ready, agentView]);
 
-  return <CustomerFormDialog mode={mode} agents={agents} profiles={profiles} />;
+  return (
+    <CustomerFormDialog
+      mode={mode}
+      agents={agents}
+      profiles={profiles}
+      agentView={agentView}
+    />
+  );
 }

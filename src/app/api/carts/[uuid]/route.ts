@@ -5,7 +5,7 @@ import { CartValidationError } from "@/lib/cart-validation";
 import { CartMutationError } from "@/lib/order-cart-upsert";
 import { updateCartByUuid } from "@/lib/cart-mutations";
 import {
-  authorizeCartViewer,
+  authorizeCartViewerWithOwner,
   buildSharedCartDTO,
   getCartViewer,
 } from "@/lib/shared-cart";
@@ -50,7 +50,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     });
 
     const viewer = await getCartViewer(request);
-    const access = authorizeCartViewer(cart, viewer);
+    const access = await authorizeCartViewerWithOwner(cart, viewer);
 
     if (!cart || !access.allowed) {
       return NextResponse.json(
@@ -101,19 +101,33 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Validar propiedad del carrito
+    // Capacidad de gestión sobre el carrito (MISMA política que el GET):
+    // dueño (sesión o cuenta), admin global, o AGENT comercial SOLO sobre
+    // carritos huérfanos/de sesión o de SUS clientes asignados — decisión
+    // resuelta con lookup del dueño (authorizeCartViewerWithOwner). El
+    // editor no tiene bypass (comportamiento histórico preservado).
     const sessionId = request.headers.get("x-session-id");
     const currentUser = await getCurrentUser();
     const userId = currentUser?.id ?? null;
     const userRole = currentUser?.role ?? null;
-    const isAdminOrAgent = userRole === "admin" || userRole === "AGENT";
 
-    const isOwner = (existingCart.sessionId && existingCart.sessionId === sessionId) || (userId && existingCart.userId === userId);
+    const access = await authorizeCartViewerWithOwner(existingCart, {
+      user: currentUser ? { id: currentUser.id, role: currentUser.role } : null,
+      sessionId,
+    });
 
-    if (!isAdminOrAgent && !isOwner) {
+    const isOwner =
+      (existingCart.sessionId && existingCart.sessionId === sessionId) ||
+      (userId && existingCart.userId === userId);
+    const isEditor = userRole?.trim().toLowerCase() === "editor";
+    const canManage = isOwner || (access.canManage && !isEditor);
+
+    if (!canManage) {
+      // Misma denegación que el GET: 404 sin filtrar la existencia del
+      // carrito ajeno (incluye AGENT sobre clientes de OTRO asesor).
       return NextResponse.json(
-        { success: false, error: "No tienes permiso para modificar este carrito" },
-        { status: 403 }
+        { success: false, error: "Carrito no encontrado" },
+        { status: 404 }
       );
     }
 
@@ -129,9 +143,18 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // servicio: una única tx con lock autoritativo del carrito re-valida
     // estado y ownership POST-lock antes de escribir, y reprecia server-side
     // con el contexto del DUEÑO del carrito (nunca datos del navegador).
+    // `staffCanManage` HILO la decisión de bypass de terceros (admin, o AGENT
+    // con ownership scoped) para que el re-check POST-lock re-enforce bajo
+    // lock EXACTAMENTE la misma decisión; los flujos de dueño quedan con la
+    // verificación de propiedad del lock intacta.
     const cart = await updateCartByUuid({
       uuid,
-      viewer: { sessionId, userId, userRole },
+      viewer: {
+        sessionId,
+        userId,
+        userRole,
+        staffCanManage: canManage && !isOwner,
+      },
       body,
     });
 

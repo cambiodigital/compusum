@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireBackofficeUser, isAgentRole } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { listActiveAgents, listActivePriceProfiles } from "@/lib/customers-admin";
 import { Header } from "@/components/admin/header";
@@ -29,16 +29,38 @@ interface Props {
   params: Promise<{ id: string }>;
 }
 
-/** Detalle del cliente del MAESTRO (User CUSTOMER) con edición y actividad. */
+/**
+ * Detalle del cliente del MAESTRO (User CUSTOMER) con edición y actividad.
+ * El AGENT comercial SOLO accede a SUS clientes (assignedAgentId = self);
+ * además, su query NUNCA trae el hash de contraseña.
+ */
 export default async function AdminCustomerDetailPage({ params }: Props) {
-  const user = await getCurrentUser();
+  const user = await requireBackofficeUser();
   if (!user) redirect("/admin/login");
 
+  const isAgent = isAgentRole(user.role);
   const { id } = await params;
 
   const customer = await db.user.findFirst({
-    where: { id, role: "CUSTOMER" },
-    include: {
+    where: {
+      id,
+      role: "CUSTOMER",
+      ...(isAgent ? { assignedAgentId: user.id } : {}),
+    },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      company: true,
+      taxId: true,
+      address: true,
+      city: true,
+      notes: true,
+      isActive: true,
+      createdAt: true,
+      assignedAgentId: true,
+      priceProfileId: true,
       assignedAgent: { select: { id: true, name: true, email: true } },
       priceProfile: { select: { id: true, name: true, code: true } },
       _count: { select: { orders: true } },
@@ -47,17 +69,26 @@ export default async function AdminCustomerDetailPage({ params }: Props) {
 
   if (!customer) notFound();
 
+  // El historial de pedidos sigue al ASESOR dueño por diseño: tras una
+  // reasignación, el AGENT solo ve pedidos creados bajo SU propiedad
+  // (misma política que GET /api/admin/customers/[id]).
+  const agentOrderScope = isAgent
+    ? { customerId: id, agentId: user.id }
+    : { customerId: id };
+
   const [agents, profiles, orders, stats] = await Promise.all([
-    listActiveAgents(),
-    listActivePriceProfiles(),
+    // Capacidad global-admin: el AGENT no necesita roster de asesores ni
+    // perfiles de precio (su formulario los oculta).
+    isAgent ? Promise.resolve([]) : listActiveAgents(),
+    isAgent ? Promise.resolve([]) : listActivePriceProfiles(),
     db.order.findMany({
-      where: { customerId: id },
+      where: agentOrderScope,
       orderBy: { createdAt: "desc" },
       take: 10,
       select: { id: true, orderNumber: true, status: true, subtotal: true, createdAt: true },
     }),
     db.order.aggregate({
-      where: { customerId: id },
+      where: agentOrderScope,
       _count: { _all: true },
       _sum: { subtotal: true },
     }),
@@ -74,16 +105,19 @@ export default async function AdminCustomerDetailPage({ params }: Props) {
           </Link>
         </Button>
         <div className="flex items-center gap-2">
-          <CustomerStateActions
-            customerId={customer.id}
-            isActive={customer.isActive}
-            hasOrders={customer._count.orders > 0}
-          />
+          {!isAgent && (
+            <CustomerStateActions
+              customerId={customer.id}
+              isActive={customer.isActive}
+              hasOrders={customer._count.orders > 0}
+            />
+          )}
           <CustomerFormDialog
             mode="edit"
             customerId={customer.id}
             agents={agents}
             profiles={profiles}
+            agentView={isAgent}
             initialValues={{
               name: customer.name,
               email: customer.email ?? "",

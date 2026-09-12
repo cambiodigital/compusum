@@ -365,7 +365,7 @@ d('T6: checkout concurrente con update (PUT) — mismos desenlaces coherentes', 
       await new Promise((r) => setTimeout(r, 100));
       return updateCartByUuid({
         uuid: cart.uuid,
-        viewer: { sessionId: null, userId: customerId, userRole: 'CUSTOMER' },
+        viewer: { sessionId: null, userId: customerId, userRole: 'CUSTOMER', staffCanManage: false },
         body: { items: [{ productId: qProductId, quantity: 4 }] },
       });
     })();
@@ -555,7 +555,7 @@ d('T9: PUT sobre carrito convertido bajo el lock => 409 determinístico y conver
     await new Promise((r) => setTimeout(r, 150)); // el PUT llega al lock
     const updatePromise = updateCartByUuid({
       uuid: cart.uuid,
-      viewer: { sessionId: SESS_Y, userId: null, userRole: null },
+      viewer: { sessionId: SESS_Y, userId: null, userRole: null, staffCanManage: false },
       body: { items: [{ productId: qProductId, quantity: 4 }] },
     }).catch((e) => e);
 

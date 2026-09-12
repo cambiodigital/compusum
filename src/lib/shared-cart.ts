@@ -1,7 +1,9 @@
 import type { Cart } from "@prisma/client";
 import { cookies } from "next/headers";
 import type { NextRequest } from "next/server";
-import { getCurrentUser, isAdminRole } from "./auth";
+import { db } from "./db";
+import { getCurrentUser } from "./auth";
+import { isBackofficeRole, isAgentRole } from "./roles";
 import type { PricingCustomerContext } from "./pricing";
 
 /**
@@ -49,28 +51,67 @@ export async function getCartViewer(
   return { user, sessionId };
 }
 
+/**
+ * Autorización capability-link. `ownerAssignedAgentId` (opcional) es el
+ * asesor asignado del DUEÑO del carrito: solo lo necesita la rama AGENT
+ * (comercial) para no gestionar carritos de clientes de OTRO asesor.
+ * - undefined: dueño sin consultar u owner inexistente => tratable.
+ * - null: el dueño no tiene asesor => tratable (venta asistida).
+ */
 export function authorizeCartViewer(
   cart: Pick<Cart, "sessionId" | "userId" | "status" | "isActive"> | null,
-  viewer: CartViewer
+  viewer: CartViewer,
+  ownerAssignedAgentId?: string | null
 ): CartViewerRole {
   if (!cart || !cart.isActive) {
     return { allowed: false, canManage: false, role: "denied" };
   }
 
-  const role = viewer.user?.role?.toLowerCase();
-  const isAdmin = isAdminRole(viewer.user?.role);
+  const isAdmin = isBackofficeRole(viewer.user?.role);
   const isOwner =
     Boolean(viewer.user && cart.userId && cart.userId === viewer.user.id) ||
     Boolean(cart.sessionId && viewer.sessionId && cart.sessionId === viewer.sessionId);
 
   if (isAdmin) {
-    return { allowed: true, canManage: true, role: "admin" };
+    if (!isAgentRole(viewer.user?.role)) {
+      return { allowed: true, canManage: true, role: "admin" };
+    }
+    // AGENT comercial: gestionar SOLO si el dueño no es cliente de OTRO
+    // asesor. Carritos huérfanos/sesión siguen manejables (venta asistida).
+    if (
+      !cart.userId ||
+      ownerAssignedAgentId === undefined ||
+      ownerAssignedAgentId === null ||
+      ownerAssignedAgentId === viewer.user?.id
+    ) {
+      return { allowed: true, canManage: true, role: "admin" };
+    }
+    return { allowed: false, canManage: false, role: "denied" };
   }
   if (isOwner) {
     return { allowed: true, canManage: true, role: "owner" };
   }
   // Capability-link: el UUID habilita la VISTA (lectura del DTO público).
   return { allowed: true, canManage: false, role: "shared" };
+}
+
+/**
+ * Variante server-side que resuelve el asesor del dueño cuando el visor es
+ * AGENT (una lectura extra solo en ese caso). Usar SIEMPRE desde las rutas
+ * reales; `authorizeCartViewer` directo queda para tests/predicado puro.
+ */
+export async function authorizeCartViewerWithOwner(
+  cart: Pick<Cart, "sessionId" | "userId" | "status" | "isActive"> | null,
+  viewer: CartViewer
+): Promise<CartViewerRole> {
+  if (cart?.userId && isAgentRole(viewer.user?.role)) {
+    const owner = await db.user.findUnique({
+      where: { id: cart.userId },
+      select: { assignedAgentId: true },
+    });
+    return authorizeCartViewer(cart, viewer, owner?.assignedAgentId ?? undefined);
+  }
+  return authorizeCartViewer(cart, viewer);
 }
 
 export interface SharedCartItemDTO {

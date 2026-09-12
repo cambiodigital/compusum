@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdminApi } from "@/lib/auth";
+import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import { createCustomerAccount, CustomerAdminError } from "@/lib/customers-admin";
 
 // GET /api/admin/customers?buscar=&page=&limit=&activos=&asesor=&perfil=
 // Maestro de clientes: fuente principal `User where role = CUSTOMER`.
+// AGENT comercial: SOLO sus clientes (assignedAgentId forzado); admin/editor
+// ven el maestro completo.
 export async function GET(request: NextRequest) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
+
+    const agent = isAgentRole(user!.role);
 
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("buscar")?.trim() || "";
@@ -21,7 +25,12 @@ export async function GET(request: NextRequest) {
     const where: Record<string, unknown> = { role: "CUSTOMER" };
     if (activos === "true") where.isActive = true;
     if (activos === "false") where.isActive = false;
-    if (asesorId) where.assignedAgentId = asesorId;
+    if (agent) {
+      // El alcance del asesor MANDA: el parámetro `asesor` se ignora.
+      where.assignedAgentId = user!.id;
+    } else if (asesorId) {
+      where.assignedAgentId = asesorId;
+    }
     if (perfilId) where.priceProfileId = perfilId;
     if (search) {
       where.OR = [
@@ -60,16 +69,27 @@ export async function GET(request: NextRequest) {
       db.user.count({ where }),
     ]);
 
-    // Métricas complementarias de pedidos (agregado por customerId)
+    // Métricas complementarias de pedidos (agregado por customerId).
+    // AGENT: siguen al ASESOR dueño (coherente con lastOrders) — tras una
+    // reasignación, solo cuentan pedidos creados bajo su propiedad.
     const customerIds = customers.map((c) => c.id);
     const orderAggregates = await db.order.groupBy({
       by: ["customerId"],
-      where: { customerId: { in: customerIds } },
+      where: {
+        customerId: { in: customerIds },
+        ...(agent ? { agentId: user!.id } : {}),
+      },
       _count: { _all: true },
       _sum: { subtotal: true },
     });
+    // El historial de pedidos sigue al ASESOR dueño por diseño: tras una
+    // reasignación del cliente, el AGENT solo ve pedidos creados bajo SU
+    // propiedad (el maestro de clientes sigue a la asignación vigente).
     const lastOrders = await db.order.findMany({
-      where: { customerId: { in: customerIds } },
+      where: {
+        customerId: { in: customerIds },
+        ...(agent ? { agentId: user!.id } : {}),
+      },
       orderBy: { createdAt: "desc" },
       select: { customerId: true, orderNumber: true, createdAt: true },
       distinct: ["customerId"],
@@ -106,12 +126,18 @@ export async function GET(request: NextRequest) {
 }
 
 // POST /api/admin/customers - crear cliente en el maestro
+// AGENT: puede crear clientes pero SIEMPRE asignados a sí mismo y sin
+// perfil de precio (capacidad global-admin); admin/editor sin cambios.
 export async function POST(request: NextRequest) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const body = await request.json();
+    if (isAgentRole(user!.role)) {
+      body.assignedAgentId = user!.id;
+      body.priceProfileId = null;
+    }
     const customer = await createCustomerAccount(body);
 
     return NextResponse.json(

@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdminApi } from "@/lib/auth";
+import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 
+// GET /api/admin/orders — AGENT: SOLO sus pedidos (agentId = self);
+// admin/editor: todos.
 export async function GET(request: NextRequest) {
   try {
-    const { error } = await requireAdminApi();
+    const { error, user } = await requireBackofficeApi();
     if (error) return error;
 
     const { searchParams } = new URL(request.url);
@@ -15,6 +17,9 @@ export async function GET(request: NextRequest) {
 
     const where: Record<string, unknown> = {};
     if (status) where.status = status;
+    if (isAgentRole(user!.role)) {
+      where.agentId = user!.id;
+    }
     if (search) {
       where.OR = [
         { customerName: { contains: search, mode: "insensitive" } },
