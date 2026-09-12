@@ -7,6 +7,14 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+// Fase 4B: aborts the status-change transaction carrying a ready-made
+// response (Prisma rolls back automatically on throw; zero partial writes).
+class OrderPatchAbort extends Error {
+  constructor(public readonly response: NextResponse) {
+    super("order-patch-abort");
+  }
+}
+
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const { error, user } = await requireBackofficeApi();
@@ -112,22 +120,101 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const updated = await db.order.update({
-      where: { id },
-      data: updateData,
-      include: { items: true },
-    });
+    // Fase 4B: status changes are transactional under a row lock: the update
+    // and its history row are written atomically, `fromStatus` is read
+    // POST-lock (never from the stale pre-lock read) and an incomplete quote
+    // can never be shared or confirmed.
+    let updated;
+    if (status !== undefined) {
+      try {
+        updated = await db.$transaction(async (tx) => {
+          const locked = await tx.$queryRaw<
+            { id: string; status: string; requestType: string }[]
+          >`
+            SELECT id, status, "requestType" FROM "Order" WHERE id = ${id} FOR UPDATE`;
 
-    // Only create history when status actually changes
-    if (status && status !== order.status) {
-      await db.orderStatusHistory.create({
-        data: {
-          orderId: id,
-          fromStatus: order.status,
-          toStatus: status,
-          changedBy: user?.name || "admin",
-          note: note || null,
-        },
+          // Deleted between the initial read and the lock.
+          if (!locked || locked.length === 0) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                { success: false, error: "Pedido no encontrado" },
+                { status: 404 }
+              )
+            );
+          }
+          const postLockStatus = locked[0].status;
+
+          // Redundant by construction (validated before the transaction), but
+          // the target is re-checked against the authoritative state.
+          if (!isValidOrderStatus(status)) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                {
+                  success: false,
+                  error: `Estado inválido. Valores permitidos: solicitado, compartido, recibido.`,
+                },
+                { status: 400 }
+              )
+            );
+          }
+
+          // Commercial guard: an incomplete quote (any line without a
+          // positive price) must never be shared or confirmed.
+          if (
+            locked[0].requestType === "cotizacion" &&
+            (status === "compartido" || status === "recibido")
+          ) {
+            const quoteItems = await tx.orderItem.findMany({
+              where: { orderId: id },
+              select: { unitPrice: true },
+            });
+            if (quoteItems.some((item) => item.unitPrice == null || item.unitPrice <= 0)) {
+              throw new OrderPatchAbort(
+                NextResponse.json(
+                  {
+                    success: false,
+                    error:
+                      "La cotización tiene líneas sin precio y no puede compartirse o recibirse",
+                  },
+                  { status: 400 }
+                )
+              );
+            }
+          }
+
+          const result = await tx.order.update({
+            where: { id },
+            data: updateData,
+            include: { items: true },
+          });
+
+          // Same observable semantics as before: history only when the status
+          // actually changes — but now compared against the POST-lock status.
+          if (status !== postLockStatus) {
+            await tx.orderStatusHistory.create({
+              data: {
+                orderId: id,
+                fromStatus: postLockStatus,
+                toStatus: status,
+                changedBy: user?.name || "admin",
+                note: note || null,
+              },
+            });
+          }
+
+          return result;
+        });
+      } catch (txError) {
+        if (txError instanceof OrderPatchAbort) {
+          return txError.response;
+        }
+        throw txError;
+      }
+    } else {
+      updated = await db.order.update({
+        where: { id },
+        data: updateData,
+        include: { items: true },
       });
     }
 
