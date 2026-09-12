@@ -22,21 +22,31 @@ import {
   Tag,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { isAgentRole } from "@/lib/roles";
 import { useState } from "react";
 
-const navigation = [
+// `adminOnly: true` => administración GLOBAL (admin/editor). El AGENT
+// comercial solo ve Dashboard, Clientes y Pedidos (con alcance propio).
+interface NavItem {
+  name: string;
+  href: string;
+  icon: typeof LayoutDashboard;
+  adminOnly?: boolean;
+}
+
+const navigation: NavItem[] = [
   { name: "Dashboard", href: "/admin", icon: LayoutDashboard },
-  { name: "Productos", href: "/admin/productos", icon: Package },
-  { name: "Categorías", href: "/admin/categorias", icon: FolderTree },
-  { name: "Marcas", href: "/admin/marcas", icon: Tags },
-  { name: "Carritos", href: "/admin/carritos", icon: ShoppingCart },
+  { name: "Productos", href: "/admin/productos", icon: Package, adminOnly: true },
+  { name: "Categorías", href: "/admin/categorias", icon: FolderTree, adminOnly: true },
+  { name: "Marcas", href: "/admin/marcas", icon: Tags, adminOnly: true },
+  { name: "Carritos", href: "/admin/carritos", icon: ShoppingCart, adminOnly: true },
   { name: "Pedidos", href: "/admin/pedidos", icon: ClipboardList },
-  { name: "Envíos", href: "/admin/envios", icon: Truck },
+  { name: "Envíos", href: "/admin/envios", icon: Truck, adminOnly: true },
   { name: "Clientes", href: "/admin/clientes", icon: Users },
-  { name: "Perfiles de precio", href: "/admin/perfiles-precio", icon: Tag },
-  { name: "Importar CSV", href: "/admin/importar", icon: Upload },
-  { name: "Páginas", href: "/admin/paginas", icon: FileText },
-  { name: "Configuración", href: "/admin/configuracion", icon: Settings },
+  { name: "Perfiles de precio", href: "/admin/perfiles-precio", icon: Tag, adminOnly: true },
+  { name: "Importar CSV", href: "/admin/importar", icon: Upload, adminOnly: true },
+  { name: "Páginas", href: "/admin/paginas", icon: FileText, adminOnly: true },
+  { name: "Configuración", href: "/admin/configuracion", icon: Settings, adminOnly: true },
 ];
 
 interface SidebarProps {
@@ -60,7 +70,7 @@ export function Sidebar({ user }: SidebarProps) {
     }
   };
 
-  const NavLink = ({ item }: { item: typeof navigation[0] }) => {
+  const NavLink = ({ item }: { item: NavItem }) => {
     const isActive = pathname === item.href || 
       (item.href !== "/admin" && pathname.startsWith(item.href));
     
@@ -126,9 +136,11 @@ export function Sidebar({ user }: SidebarProps) {
 
         {/* Navigation */}
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {navigation.map((item) => (
-            <NavLink key={item.name} item={item} />
-          ))}
+          {navigation
+            .filter((item) => !item.adminOnly || !isAgentRole(user.role))
+            .map((item) => (
+              <NavLink key={item.name} item={item} />
+            ))}
         </nav>
 
         {/* User section */}

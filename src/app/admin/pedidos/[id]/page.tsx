@@ -1,5 +1,5 @@
 import { redirect, notFound } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireBackofficeUser, isAgentRole } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,14 +27,16 @@ interface Props {
   params: Promise<{ id: string }>;
 }
 
+// DETALLE DE PEDIDO: el AGENT comercial solo accede a SUS pedidos
+// (agentId = self); cualquier otro => 404.
 export default async function AdminOrderDetailPage({ params }: Props) {
-  const user = await getCurrentUser();
+  const user = await requireBackofficeUser();
   if (!user) redirect("/admin/login");
 
   const { id } = await params;
 
-  const order = await db.order.findUnique({
-    where: { id },
+  const order = await db.order.findFirst({
+    where: isAgentRole(user.role) ? { id, agentId: user.id } : { id },
     include: {
       items: true,
       statusHistory: { orderBy: { createdAt: "asc" } },
@@ -151,6 +153,7 @@ export default async function AdminOrderDetailPage({ params }: Props) {
             customerEmail={order.customerEmail}
             customerPhone={order.customerPhone}
             customerCompany={order.customerCompany}
+            agentView={isAgentRole(user.role)}
           />
         </div>
 

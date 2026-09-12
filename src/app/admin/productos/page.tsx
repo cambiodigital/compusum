@@ -1,10 +1,10 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminUser } from "@/lib/auth";
 import { Header } from "@/components/admin/header";
 import { AdminProductsTable } from "@/components/admin/products-table";
 
 export default async function AdminProductsPage() {
-  const user = await getCurrentUser();
+  const user = await requireAdminUser();
 
   if (!user) {
     redirect("/admin/login");

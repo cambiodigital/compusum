@@ -378,11 +378,14 @@ export async function resolvePrice(
  * RESOLUCIÓN SEGURA DEL CLIENTE QUE DETERMINA EL PRECIO.
  *
  * - Cliente autenticado con rol CUSTOMER => él mismo (sesión server-side).
- * - ADMIN/AGENT autenticado => puede resolver el cliente por el contacto del
+ * - ADMIN/EDITOR autenticado => puede resolver el cliente por el contacto del
  *   pedido (búsqueda server-side autorizada; permite vender con el precio del
  *   cliente asignado). Sin contacto válido => precio base. La búsqueda
  *   FILTRA EXPLÍCITAMENTE role=CUSTOMER: nunca puede resolverse un usuario
  *   interno (admin/editor/AGENT) por coincidencia de contacto.
+ * - AGENT autenticado => igual que admin/editor pero restringido a SUS
+ *   clientes asignados (User.assignedAgentId = agent.id); nunca ve precios
+ *   de clientes de otro asesor.
  * - Invitado => SIEMPRE null (precio base/default de invitado). El contacto
  *   escrito en checkout JAMÁS determina el perfil de precio.
  */
@@ -408,6 +411,8 @@ export async function resolveServerPricingCustomer(
         isActive: true,
         // SOLO clientes: un usuario interno nunca determina precio comercial.
         role: { equals: "CUSTOMER", mode: "insensitive" },
+        // AGENT: aislamiento por asesor (solo sus clientes asignados).
+        ...(role === "agent" ? { assignedAgentId: sessionUser.id } : {}),
         OR: [
           ...(phone ? phoneOrVariants(phone) : []),
           ...(email ? [{ email }] : []),

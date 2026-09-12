@@ -8,7 +8,7 @@ import { isGlobalCatalogModeEnabled } from "@/lib/catalog-mode";
 import { getSessionPricingContext } from "@/lib/pricing-context";
 import { attachResolvedPricesToCartItems } from "@/lib/pricing";
 import {
-  authorizeCartViewer,
+  authorizeCartViewerWithOwner,
   buildSharedCartDTO,
   getCartViewer,
 } from "@/lib/shared-cart";
@@ -67,7 +67,8 @@ export default async function SharedCartPage({ params }: PageProps) {
   });
 
   const viewer = await getCartViewer();
-  const access = authorizeCartViewer(cart, viewer);
+  // MISMA política que la API: el AGENT solo gestiona con lookup del dueño.
+  const access = await authorizeCartViewerWithOwner(cart, viewer);
 
   if (!cart || !access.allowed) {
     notFound();

@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent } from "@/components/ui/card";
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
  * El precio base Siesa nunca se toca: los overrides viven en tablas separadas.
  */
 export default async function AdminPerfilesPrecioPage() {
-  const user = await getCurrentUser();
+  const user = await requireAdminUser();
   if (!user) redirect("/admin/login");
 
   const profiles = await db.priceProfile.findMany({

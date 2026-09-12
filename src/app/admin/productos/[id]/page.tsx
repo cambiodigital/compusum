@@ -1,5 +1,5 @@
 import { redirect, notFound } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { ProductForm } from "@/components/admin/product-form";
@@ -9,7 +9,7 @@ interface Props {
 }
 
 export default async function EditProductPage({ params }: Props) {
-  const user = await getCurrentUser();
+  const user = await requireAdminUser();
 
   if (!user) {
     redirect("/admin/login");

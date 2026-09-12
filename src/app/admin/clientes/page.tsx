@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
+import { requireBackofficeUser, isAgentRole } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent } from "@/components/ui/card";
@@ -28,12 +28,14 @@ interface Props {
 /**
  * MAESTRO DE CLIENTES: fuente principal `User where role = CUSTOMER`
  * (no agrupación de pedidos). Los pedidos históricos se usan solo como
- * métricas complementarias.
+ * métricas complementarias. El AGENT comercial SOLO ve sus clientes
+ * (assignedAgentId = self).
  */
 export default async function AdminClientesPage({ searchParams }: Props) {
-  const user = await getCurrentUser();
+  const user = await requireBackofficeUser();
   if (!user) redirect("/admin/login");
 
+  const isAgent = isAgentRole(user.role);
   const params = await searchParams;
   const page = Math.max(1, parseInt(params.page || "1"));
   const limit = 20;
@@ -41,6 +43,7 @@ export default async function AdminClientesPage({ searchParams }: Props) {
   const activos = params.activos;
 
   const where: Record<string, unknown> = { role: "CUSTOMER" };
+  if (isAgent) where.assignedAgentId = user.id;
   if (activos === "true") where.isActive = true;
   if (activos === "false") where.isActive = false;
   if (search) {
@@ -52,6 +55,9 @@ export default async function AdminClientesPage({ searchParams }: Props) {
       { taxId: { contains: search } },
     ];
   }
+
+  const countWhere: Record<string, unknown> = { role: "CUSTOMER" };
+  if (isAgent) countWhere.assignedAgentId = user.id;
 
   const [customers, total, totalCustomers] = await Promise.all([
     db.user.findMany({
@@ -74,15 +80,19 @@ export default async function AdminClientesPage({ searchParams }: Props) {
       take: limit,
     }),
     db.user.count({ where }),
-    db.user.count({ where: { role: "CUSTOMER" } }),
+    db.user.count({ where: countWhere }),
   ]);
 
-  // Métricas complementarias por pedidos (para los clientes de la página actual)
+  // Métricas complementarias por pedidos (para los clientes de la página
+  // actual). AGENT: scoped también al propio maestro de clientes.
   const customerIds = customers.map((c) => c.id);
   const orderAggregates = customerIds.length
     ? await db.order.groupBy({
         by: ["customerId"],
-        where: { customerId: { in: customerIds } },
+        where: {
+          customerId: { in: customerIds },
+          ...(isAgent ? { customer: { assignedAgentId: user.id } } : {}),
+        },
         _sum: { subtotal: true },
       })
     : [];
@@ -94,7 +104,14 @@ export default async function AdminClientesPage({ searchParams }: Props) {
 
   return (
     <div>
-      <Header title="Clientes" subtitle={`${totalCustomers} clientes en el maestro`} />
+      <Header
+        title="Clientes"
+        subtitle={
+          isAgent
+            ? `${totalCustomers} clientes asignados`
+            : `${totalCustomers} clientes en el maestro`
+        }
+      />
 
       {/* Search + actions */}
       <div className="px-6 py-4 border-b border-slate-200 flex flex-wrap items-center gap-2">
@@ -122,12 +139,14 @@ export default async function AdminClientesPage({ searchParams }: Props) {
           <Button asChild variant={activos === "false" ? "secondary" : "outline"} size="sm">
             <Link href="/admin/clientes?activos=false">Inactivos</Link>
           </Button>
-          <Button asChild variant="outline" size="sm">
-            <Link href="/admin/perfiles-precio">
-              <Tag className="h-4 w-4 mr-1" /> Perfiles de precio
-            </Link>
-          </Button>
-          <CreateCustomerButton />
+          {!isAgent && (
+            <Button asChild variant="outline" size="sm">
+              <Link href="/admin/perfiles-precio">
+                <Tag className="h-4 w-4 mr-1" /> Perfiles de precio
+              </Link>
+            </Button>
+          )}
+          <CreateCustomerButton agentView={isAgent} />
         </div>
       </div>
 

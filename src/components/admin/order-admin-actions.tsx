@@ -46,6 +46,11 @@ interface OrderAdminActionsProps {
   customerEmail?: string | null;
   customerPhone?: string | null;
   customerCompany?: string | null;
+  /**
+   * Agent (commercial) view: hides webhook, duplication and deletion
+   * (admin/editor capabilities the API rejects with 403).
+   */
+  agentView?: boolean;
 }
 
 export function OrderAdminActions({
@@ -57,6 +62,7 @@ export function OrderAdminActions({
   customerEmail,
   customerPhone,
   customerCompany,
+  agentView = false,
 }: OrderAdminActionsProps) {
   const [status, setStatus] = useState(currentStatus);
   const [notes, setNotes] = useState(currentNotes);
@@ -247,15 +253,17 @@ export function OrderAdminActions({
           </Button>
         </div>
 
-        <Button
-          className="w-full gap-2"
-          variant="outline"
-          onClick={handleSendWebhook}
-          disabled={webhookLoading}
-        >
-          <Send className="h-4 w-4" />
-          {webhookLoading ? "Enviando..." : webhookSent ? "Reenviar a N8N" : "Enviar a N8N"}
-        </Button>
+        {!agentView && (
+          <Button
+            className="w-full gap-2"
+            variant="outline"
+            onClick={handleSendWebhook}
+            disabled={webhookLoading}
+          >
+            <Send className="h-4 w-4" />
+            {webhookLoading ? "Enviando..." : webhookSent ? "Reenviar a N8N" : "Enviar a N8N"}
+          </Button>
+        )}
 
         {webhookSent && (
           <p className="text-xs text-green-600 flex items-center gap-1">
@@ -323,41 +331,44 @@ export function OrderAdminActions({
             </DialogContent>
           </Dialog>
 
-          {/* Duplicate */}
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full gap-2"
-            onClick={handleDuplicate}
-            disabled={duplicating}
-          >
-            <Copy className="h-3.5 w-3.5" />
-            {duplicating ? "Duplicando..." : "Duplicar pedido"}
-          </Button>
+          {/* Duplicate (admin/editor only; hidden in agent view) */}
+          {!agentView && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full gap-2"
+              onClick={handleDuplicate}
+              disabled={duplicating}
+            >
+              <Copy className="h-3.5 w-3.5" />
+              {duplicating ? "Duplicando..." : "Duplicar pedido"}
+            </Button>
+          )}
 
-          {/* Delete */}
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive" size="sm" className="w-full gap-2">
-                <Trash2 className="h-3.5 w-3.5" />
-                Eliminar pedido
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>¿Eliminar este pedido?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Esta acción no se puede deshacer. Se eliminarán el pedido, sus productos y todo el historial de estados.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                <AlertDialogAction onClick={handleDelete} disabled={deleting}>
-                  {deleting ? "Eliminando..." : "Eliminar"}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          {!agentView && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="destructive" size="sm" className="w-full gap-2">
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Eliminar pedido
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>¿Eliminar este pedido?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Esta acción no se puede deshacer. Se eliminarán el pedido, sus productos y todo el historial de estados.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleDelete} disabled={deleting}>
+                    {deleting ? "Eliminando..." : "Eliminar"}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
         </div>
       </CardContent>
     </Card>

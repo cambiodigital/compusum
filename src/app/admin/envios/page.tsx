@@ -70,6 +70,11 @@ export default async function AdminEnviosPage({
   async function createRoute(formData: FormData) {
     "use server";
 
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
+
     const name = String(formData.get("name") || "").trim();
     const estimatedDaysMin = Number(formData.get("estimatedDaysMin") || 0);
     const estimatedDaysMax = Number(formData.get("estimatedDaysMax") || 0);
@@ -117,6 +122,11 @@ export default async function AdminEnviosPage({
 
   async function updateRoute(formData: FormData) {
     "use server";
+
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
 
     const id = String(formData.get("id") || "").trim();
     const estimatedDaysMin = Number(formData.get("estimatedDaysMin") || 0);
@@ -168,6 +178,11 @@ export default async function AdminEnviosPage({
   async function createDepartment(formData: FormData) {
     "use server";
 
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
+
     const name = String(formData.get("name") || "").trim();
     const code = String(formData.get("code") || "").trim().toUpperCase();
 
@@ -188,6 +203,11 @@ export default async function AdminEnviosPage({
 
   async function createCity(formData: FormData) {
     "use server";
+
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
 
     const name = String(formData.get("name") || "").trim();
     const departmentId = String(formData.get("departmentId") || "").trim();
@@ -225,6 +245,11 @@ export default async function AdminEnviosPage({
   async function updateCity(formData: FormData) {
     "use server";
 
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
+
     const id = String(formData.get("id") || "").trim();
     const shippingRouteIdRaw = String(formData.get("shippingRouteId") || "").trim();
     const shippingRouteId = shippingRouteIdRaw || null;
@@ -250,6 +275,11 @@ export default async function AdminEnviosPage({
   async function deleteRoute(formData: FormData) {
     "use server";
 
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
+
     const id = String(formData.get("id") || "").trim();
     if (!id) redirect("/admin/envios?error=route-delete-invalid");
 
@@ -274,6 +304,11 @@ export default async function AdminEnviosPage({
 
   async function duplicateRoute(formData: FormData) {
     "use server";
+
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
 
     const id = String(formData.get("id") || "").trim();
     if (!id) redirect("/admin/envios?error=route-duplicate-invalid");
@@ -301,6 +336,11 @@ export default async function AdminEnviosPage({
 
   async function deleteCity(formData: FormData) {
     "use server";
+
+    // Re-verificación server-side: la página es admin-only y cada acción
+    // también (el proxy no cubre server actions invocadas directamente).
+    const currentUser = await requireAdminUser();
+    if (!currentUser) throw new Error("No autorizado");
 
     const id = String(formData.get("id") || "").trim();
     if (!id) redirect("/admin/envios?error=city-delete-invalid");

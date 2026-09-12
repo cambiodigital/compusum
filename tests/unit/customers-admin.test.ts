@@ -38,13 +38,14 @@ beforeEach(() => {
 });
 
 describe('RBAC: un CUSTOMER no accede a funciones administrativas', () => {
-  it('isAdminRole rechaza CUSTOMER y acepta admin/editor/AGENT', () => {
+  it('isAdminRole rechaza CUSTOMER/AGENT y acepta admin/editor', () => {
     expect(isAdminRole('CUSTOMER')).toBe(false);
     expect(isAdminRole('customer')).toBe(false);
+    expect(isAdminRole('AGENT')).toBe(false);
+    expect(isAdminRole('agent')).toBe(false);
     expect(isAdminRole(null)).toBe(false);
     expect(isAdminRole('admin')).toBe(true);
     expect(isAdminRole('editor')).toBe(true);
-    expect(isAdminRole('AGENT')).toBe(true);
   });
 
   it('adminPricingCustomer: solo un CUSTOMER autenticado define su precio; staff/invitado => base', () => {

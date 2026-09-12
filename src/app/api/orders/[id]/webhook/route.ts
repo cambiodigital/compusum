@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getCurrentUser } from "@/lib/auth";
+import { requireAdminApi } from "@/lib/auth";
 import { sendToWebhook, buildWebhookPayload } from "@/lib/webhook";
 
 interface RouteParams {
@@ -9,10 +9,10 @@ interface RouteParams {
 
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
-    const user = await getCurrentUser();
-    if (!user) {
-      return NextResponse.json({ success: false, error: "No autorizado" }, { status: 401 });
-    }
+    // Capacidad global-admin (admin/editor): disparar el webhook N8N y
+    // mutar el estado de CUALQUIER pedido no es una operación comercial.
+    const { error, user } = await requireAdminApi();
+    if (error) return error;
 
     const { id } = await params;
 
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
           orderId: id,
           fromStatus: payload.status,
           toStatus: "compartido",
-          changedBy: user.name || "admin",
+          changedBy: user?.name || "admin",
           note: "Enviado manualmente via webhook",
         },
       });

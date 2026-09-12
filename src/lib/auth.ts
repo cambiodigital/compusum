@@ -2,19 +2,26 @@ import bcrypt from 'bcryptjs';
 import { db } from './db';
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
+import { isAdminRole, isBackofficeRole } from './roles';
+
+// Predicados/constantes de roles viven en `./roles` (puro, client-safe).
+// Re-exportados aquí para compatibilidad con los import existentes.
+export {
+  ADMIN_ROLES,
+  BACKOFFICE_ROLES,
+  isAdminRole,
+  isBackofficeRole,
+  isAgentRole,
+  agentCustomerScope,
+  agentOrderScope,
+  scopeCustomersForRole,
+  scopeOrdersForRole,
+} from './roles';
 
 const SALT_ROUNDS = 10;
 const SESSION_COOKIE_NAME = 'session_token';
 export const SESSION_DURATION_HOURS_DEFAULT = 24;
 export const SESSION_DURATION_DAYS_REMEMBER_ME = 30;
-
-export const ADMIN_ROLES = ['admin', 'editor', 'AGENT'] as const;
-
-export function isAdminRole(role?: string | null): boolean {
-  if (!role) return false;
-  const normalized = role.trim().toLowerCase();
-  return ADMIN_ROLES.some((r) => r.toLowerCase() === normalized);
-}
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, SALT_ROUNDS);
@@ -105,6 +112,23 @@ export async function requireAdminUser(): Promise<{
   return user;
 }
 
+/**
+ * Acceso al panel /admin (backoffice): admin, editor y AGENT comercial.
+ * El alcance de datos del AGENT se aplica en cada página/API, no aquí.
+ */
+export async function requireBackofficeUser(): Promise<{
+  id: string;
+  name: string;
+  email: string | null;
+  role: string;
+} | null> {
+  const user = await getCurrentUser();
+  if (!user || !isBackofficeRole(user.role)) {
+    return null;
+  }
+  return user;
+}
+
 export async function requireAdminApi(): Promise<{
   error: NextResponse | null;
   user: { id: string; name: string; email: string | null; role: string } | null;
@@ -121,6 +145,38 @@ export async function requireAdminApi(): Promise<{
   }
 
   if (!isAdminRole(user.role)) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: "Acceso denegado: se requiere rol administrativo" },
+        { status: 403 }
+      ),
+      user: null,
+    };
+  }
+
+  return { error: null, user };
+}
+
+/**
+ * Igual que `requireAdminApi` pero admite el rol AGENT (backoffice). Las
+ * rutas que la usan DEBEN aplicar su propio alcance por asesor.
+ */
+export async function requireBackofficeApi(): Promise<{
+  error: NextResponse | null;
+  user: { id: string; name: string; email: string | null; role: string } | null;
+}> {
+  const user = await getCurrentUser();
+  if (!user) {
+    return {
+      error: NextResponse.json(
+        { success: false, error: "No autorizado" },
+        { status: 401 }
+      ),
+      user: null,
+    };
+  }
+
+  if (!isBackofficeRole(user.role)) {
     return {
       error: NextResponse.json(
         { success: false, error: "Acceso denegado: se requiere rol administrativo" },

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { isAdminRole } from "@/lib/auth";
+import { isBackofficeRole, isAgentRole } from "@/lib/roles";
 
 // Routes that don't require authentication
 const publicRoutes = ["/admin/login"];
@@ -98,7 +98,7 @@ export async function proxy(request: NextRequest) {
       return NextResponse.redirect(loginUrl);
     }
 
-    if (!isAdminRole(session.user.role)) {
+    if (!isBackofficeRole(session.user.role)) {
       if (isAdminApi) {
         return NextResponse.json(
           { success: false, error: "Acceso denegado: se requiere rol administrativo" },
@@ -107,6 +107,27 @@ export async function proxy(request: NextRequest) {
       }
       const loginUrl = new URL("/admin/login", request.url);
       return NextResponse.redirect(loginUrl);
+    }
+
+    // AGENT comercial: allowlist estricta de rutas del backoffice. Todo lo
+    // demás bajo /admin o /api/admin queda bloqueado en el borde (las rutas
+    // permitidas además re-verifican rol y aplican su alcance por asesor).
+    if (isAgentRole(session.user.role)) {
+      const allowed =
+        pathname === "/admin" ||
+        pathname.startsWith("/admin/clientes") ||
+        pathname.startsWith("/admin/pedidos") ||
+        pathname.startsWith("/api/admin/customers") ||
+        pathname.startsWith("/api/admin/orders");
+      if (!allowed) {
+        if (isAdminApi) {
+          return NextResponse.json(
+            { success: false, error: "Acceso denegado: se requiere rol administrativo" },
+            { status: 403 }
+          );
+        }
+        return NextResponse.redirect(new URL("/admin", request.url));
+      }
     }
   } catch (error) {
     console.error("Error verificando sesión/rol en proxy:", error);

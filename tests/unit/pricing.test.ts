@@ -550,3 +550,39 @@ describe('Pricing: attachResolvedPrices para render/API', () => {
     expect(attached.variants[0].resolvedPrice).toBeNull();
   });
 });
+
+describe('Pricing Fase 4A: resolveServerPricingCustomer con aislamiento por asesor', () => {
+  it('AGENT => búsqueda restringida a SUS clientes (assignedAgentId = self)', async () => {
+    const tx = {
+      user: { findFirst: vi.fn().mockResolvedValue({ id: 'cust-own' }) },
+    };
+    const customerId = await resolveServerPricingCustomer(
+      { id: 'agent-1', role: 'AGENT' },
+      { phone: '3001234567' },
+      tx
+    );
+    expect(customerId).toBe('cust-own');
+    expect(tx.user.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          role: expect.objectContaining({ equals: 'CUSTOMER' }),
+          assignedAgentId: 'agent-1',
+        }),
+      })
+    );
+  });
+
+  it('EDITOR sin alcance por asesor (global, sin cambios)', async () => {
+    const tx = {
+      user: { findFirst: vi.fn().mockResolvedValue({ id: 'cust-2' }) },
+    };
+    await resolveServerPricingCustomer(
+      { id: 'editor-1', role: 'editor' },
+      { phone: '3001234567' },
+      tx
+    );
+    const where = (tx.user.findFirst as ReturnType<typeof vi.fn>).mock
+      .calls[0][0].where as Record<string, unknown>;
+    expect(where.assignedAgentId).toBeUndefined();
+  });
+});
