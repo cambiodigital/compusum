@@ -52,11 +52,13 @@ export async function getCartViewer(
 }
 
 /**
- * Autorización capability-link. `ownerAssignedAgentId` (opcional) es el
- * asesor asignado del DUEÑO del carrito: solo lo necesita la rama AGENT
- * (comercial) para no gestionar carritos de clientes de OTRO asesor.
- * - undefined: dueño sin consultar u owner inexistente => tratable.
- * - null: el dueño no tiene asesor => tratable (venta asistida).
+ * Capability-link authorization. `ownerAssignedAgentId` (optional) is the
+ * assigned agent of the cart OWNER; only the AGENT (commercial) branch uses
+ * it. For an AGENT, a cart with a registered owner (`userId`) is manageable
+ * ONLY when the owner exists and is assigned to that same agent: any other
+ * case (owner missing/not resolved, owner without assignment, assigned to a
+ * different agent) fails closed. Guest/session carts (`userId === null`)
+ * remain manageable (assisted sale). Other actors are unaffected.
  */
 export function authorizeCartViewer(
   cart: Pick<Cart, "sessionId" | "userId" | "status" | "isActive"> | null,
@@ -76,14 +78,15 @@ export function authorizeCartViewer(
     if (!isAgentRole(viewer.user?.role)) {
       return { allowed: true, canManage: true, role: "admin" };
     }
-    // AGENT comercial: gestionar SOLO si el dueño no es cliente de OTRO
-    // asesor. Carritos huérfanos/sesión siguen manejables (venta asistida).
-    if (
-      !cart.userId ||
-      ownerAssignedAgentId === undefined ||
-      ownerAssignedAgentId === null ||
-      ownerAssignedAgentId === viewer.user?.id
-    ) {
+    // AGENT commercial: guest/session carts (no registered owner) stay
+    // manageable (assisted sale). A registered owner's cart is manageable
+    // ONLY by the agent assigned to that owner — fail closed otherwise
+    // (owner missing, owner info unavailable, no assignment, or assigned
+    // to a different agent).
+    if (!cart.userId) {
+      return { allowed: true, canManage: true, role: "admin" };
+    }
+    if (ownerAssignedAgentId != null && ownerAssignedAgentId === viewer.user?.id) {
       return { allowed: true, canManage: true, role: "admin" };
     }
     return { allowed: false, canManage: false, role: "denied" };
@@ -96,9 +99,11 @@ export function authorizeCartViewer(
 }
 
 /**
- * Variante server-side que resuelve el asesor del dueño cuando el visor es
- * AGENT (una lectura extra solo en ese caso). Usar SIEMPRE desde las rutas
- * reales; `authorizeCartViewer` directo queda para tests/predicado puro.
+ * Server-side variant that resolves the owner's assigned agent when the
+ * viewer is AGENT (one extra read only in that case). Always use this from
+ * the real routes; the pure `authorizeCartViewer` stays for tests/pure
+ * predicates. Fail closed: a missing owner record (or unavailable owner
+ * info) denies AGENT management of a registered owner's cart.
  */
 export async function authorizeCartViewerWithOwner(
   cart: Pick<Cart, "sessionId" | "userId" | "status" | "isActive"> | null,

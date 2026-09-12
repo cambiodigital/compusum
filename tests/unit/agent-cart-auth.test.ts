@@ -74,7 +74,18 @@ describe('authorizeCartViewerWithOwner: AGENT comercial', () => {
     expect(mockDb.user.findUnique).not.toHaveBeenCalled();
   });
 
-  it('dueño inexistente en DB: tratable (fail-open acordado para venta asistida)', async () => {
+  it('registered customer with NO assigned agent: denied (fail closed)', async () => {
+    mockDb.user.findUnique.mockResolvedValue({ assignedAgentId: null });
+
+    const access = await authorizeCartViewerWithOwner(
+      cart({ userId: 'cust-sin-asesor' }),
+      { user: AGENT_A, sessionId: null }
+    );
+
+    expect(access).toEqual({ allowed: false, canManage: false, role: 'denied' });
+  });
+
+  it('owner record missing in DB: denied (fail closed)', async () => {
     mockDb.user.findUnique.mockResolvedValue(null);
 
     const access = await authorizeCartViewerWithOwner(
@@ -82,7 +93,7 @@ describe('authorizeCartViewerWithOwner: AGENT comercial', () => {
       { user: AGENT_A, sessionId: null }
     );
 
-    expect(access).toEqual({ allowed: true, canManage: true, role: 'admin' });
+    expect(access).toEqual({ allowed: false, canManage: false, role: 'denied' });
   });
 });
 
@@ -96,12 +107,12 @@ describe('authorizeCartViewer: ramas no-AGENT sin cambios', () => {
     ).toEqual({ allowed: true, canManage: true, role: 'admin' });
   });
 
-  it('AGENT sincrono sin info de dueño: tratable (compatibilidad con firma previa)', () => {
+  it('AGENT on a registered-owner cart without resolved owner info: denied (fail closed)', () => {
     const access = authorizeCartViewer(
       cart({ userId: 'cust-x' }),
       { user: AGENT_B, sessionId: null }
     );
-    expect(access).toEqual({ allowed: true, canManage: true, role: 'admin' });
+    expect(access).toEqual({ allowed: false, canManage: false, role: 'denied' });
   });
 
   it('CUSTOMER ajeno: solo lectura por capability-link', () => {

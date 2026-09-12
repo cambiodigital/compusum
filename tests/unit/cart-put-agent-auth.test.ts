@@ -86,6 +86,28 @@ describe('PUT /api/carts/[uuid] — aislamiento por asesor (ruta + hilo al lock)
     expect(mockUpdateCartByUuid).not.toHaveBeenCalled();
   });
 
+  it('AGENT on registered customer with NO assigned agent => 404 (fail closed)', async () => {
+    authState.currentUser = AGENT_A;
+    mockDb.cart.findUnique.mockResolvedValue(cartRow({ userId: 'cust-sin-asesor' }));
+    mockDb.user.findUnique.mockResolvedValue({ assignedAgentId: null });
+
+    const res = await cartPUT(req('uuid-1', { items: [] }), idParams('uuid-1'));
+
+    expect(res.status).toBe(404);
+    expect(mockUpdateCartByUuid).not.toHaveBeenCalled();
+  });
+
+  it('AGENT when the owner record is missing => 404 (fail closed)', async () => {
+    authState.currentUser = AGENT_A;
+    mockDb.cart.findUnique.mockResolvedValue(cartRow({ userId: 'cust-fantasma' }));
+    mockDb.user.findUnique.mockResolvedValue(null);
+
+    const res = await cartPUT(req('uuid-1', { items: [] }), idParams('uuid-1'));
+
+    expect(res.status).toBe(404);
+    expect(mockUpdateCartByUuid).not.toHaveBeenCalled();
+  });
+
   it('AGENT sobre carrito de SU cliente asignado => 200 y staffCanManage=true hilado', async () => {
     authState.currentUser = AGENT_A;
     mockDb.cart.findUnique.mockResolvedValue(cartRow({ userId: 'cust-a' }));
