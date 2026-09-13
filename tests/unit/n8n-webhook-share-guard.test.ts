@@ -176,3 +176,142 @@ describe('N8N callback: guard de cotización incompleta', () => {
     expect(mockDb.order.update).not.toHaveBeenCalled();
   });
 });
+
+describe('N8N callback: validación de identificadores ANTES de tocar la base', () => {
+  /**
+   * Pre-fix, `where: orderId ? { id } : { orderNumber }` con ambos ausentes
+   * quedaba como un filtro Prisma efectivamente vacío: `findFirst` devolvía el
+   * PRIMER Order y el webhook lo confirmaba a 'recibido' con historial ajeno.
+   * Cada caso inválido siembra un Order válido para que el bug fuera
+   * observable, y afirma que NO hubo NI UNA llamada a base.
+   */
+  function expectZeroDbAccess() {
+    expect(mockDb.order.findFirst).not.toHaveBeenCalled();
+    expect(mockDb.order.findUnique).not.toHaveBeenCalled();
+    expect(mockDb.orderItem.findMany).not.toHaveBeenCalled();
+    expect(mockDb.order.update).not.toHaveBeenCalled();
+    expect(mockDb.orderStatusHistory.create).not.toHaveBeenCalled();
+  }
+
+  const INVALID_IDENTIFIERS: Array<[string, unknown]> = [
+    ['orderId vacío', { orderId: '' }],
+    ['orderId en blanco', { orderId: '   ' }],
+    ['orderId y orderNumber en blanco', { orderId: '   ', orderNumber: '   ' }],
+    ['orderNumber vacío', { orderNumber: '' }],
+    ['orderId null', { orderId: null }],
+    ['orderId y orderNumber null', { orderId: null, orderNumber: null }],
+    ['orderId numérico', { orderId: 123 }],
+    ['orderNumber booleano', { orderNumber: true }],
+    ['orderId objeto', { orderId: { id: 'order-1' } }],
+    ['orderId array', { orderId: ['order-1'] }],
+  ];
+
+  it('sin orderId ni orderNumber => 400 y CERO acceso a base', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req({ status: 'recibido' }));
+    const json = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(json).toEqual({ success: false, error: 'Se requiere orderId u orderNumber' });
+    expectZeroDbAccess();
+  });
+
+  it('body JSON nulo => 400 y CERO acceso a base', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req(null));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('Se requiere orderId u orderNumber');
+    expectZeroDbAccess();
+  });
+
+  it('body JSON primitivo => 400 y CERO acceso a base', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req('order-1'));
+
+    expect(res.status).toBe(400);
+    expectZeroDbAccess();
+  });
+
+  it('JSON malformado => 400 y CERO acceso a base', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/n8n', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        body: '{no-es-json',
+      }) as unknown as NextRequest
+    );
+
+    expect(res.status).toBe(400);
+    expectZeroDbAccess();
+  });
+
+  it.each(INVALID_IDENTIFIERS)('%s => 400 y CERO acceso a base', async (_name, body) => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req(body));
+    const json = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(json).toEqual({ success: false, error: 'Se requiere orderId u orderNumber' });
+    expectZeroDbAccess();
+  });
+
+  it('orderId válido => lookup por id y confirmación', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req({ orderId: 'order-1' }));
+
+    expect(res.status).toBe(200);
+    expect(mockDb.order.findFirst).toHaveBeenCalledTimes(1);
+    expect(mockDb.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1' } });
+    expect(mockDb.order.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('orderId válido con espacios => se normaliza (trim) antes del lookup', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req({ orderId: '  order-1  ' }));
+
+    expect(res.status).toBe(200);
+    expect(mockDb.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1' } });
+  });
+
+  it('sin orderId + orderNumber válido => lookup por orderNumber', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req({ orderNumber: '  CS-4B-0001  ' }));
+
+    expect(res.status).toBe(200);
+    expect(mockDb.order.findFirst).toHaveBeenCalledTimes(1);
+    expect(mockDb.order.findFirst).toHaveBeenCalledWith({
+      where: { orderNumber: 'CS-4B-0001' },
+    });
+  });
+
+  it('orderId y orderNumber válidos => precedencia intacta de orderId', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req({ orderId: 'order-1', orderNumber: 'CS-4B-0001' }));
+
+    expect(res.status).toBe(200);
+    expect(mockDb.order.findFirst).toHaveBeenCalledTimes(1);
+    expect(mockDb.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1' } });
+  });
+
+  it('orderId inválido pero orderNumber válido => cae a orderNumber', async () => {
+    installDb(makeOrder(), [10000]);
+
+    const res = await POST(req({ orderId: '   ', orderNumber: 'CS-4B-0001' }));
+
+    expect(res.status).toBe(200);
+    expect(mockDb.order.findFirst).toHaveBeenCalledWith({
+      where: { orderNumber: 'CS-4B-0001' },
+    });
+  });
+});

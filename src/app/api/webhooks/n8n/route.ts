@@ -5,6 +5,17 @@ import {
   CommercialOrderError,
 } from "@/lib/commercial-order";
 
+/**
+ * An identifier is usable only when it is a string with non-whitespace
+ * content. Anything else (undefined, null, numbers, booleans, objects, empty
+ * or blank strings) normalizes to null.
+ */
+function normalizedIdentifier(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     // Validate API key from N8N
@@ -18,13 +29,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return NextResponse.json(
+        { success: false, error: "Se requiere orderId u orderNumber" },
+        { status: 400 }
+      );
+    }
+
     const { orderNumber, orderId, status: responseStatus } = body;
 
-    // Find the order by orderNumber or orderId
-    const order = await db.order.findFirst({
-      where: orderId ? { id: orderId } : { orderNumber },
-    });
+    // Fase 4B: la validación ocurre ANTES de cualquier acceso a base. Sin un
+    // identificador utilizable, el `where` de Prisma queda efectivamente vacío
+    // (`{ orderNumber: undefined }`) y `findFirst` devuelve el PRIMER Order:
+    // ese pedido ajeno sería confirmado a "recibido" con una fila de historial
+    // incorrecta. Precedencia intacta: orderId válido manda; si no,
+    // orderNumber.
+    const normalizedOrderId = normalizedIdentifier(orderId);
+    const normalizedOrderNumber = normalizedIdentifier(orderNumber);
+
+    let orderWhere: { id: string } | { orderNumber: string };
+    if (normalizedOrderId) {
+      orderWhere = { id: normalizedOrderId };
+    } else if (normalizedOrderNumber) {
+      orderWhere = { orderNumber: normalizedOrderNumber };
+    } else {
+      return NextResponse.json(
+        { success: false, error: "Se requiere orderId u orderNumber" },
+        { status: 400 }
+      );
+    }
+
+    const order = await db.order.findFirst({ where: orderWhere });
 
     if (!order) {
       return NextResponse.json(
