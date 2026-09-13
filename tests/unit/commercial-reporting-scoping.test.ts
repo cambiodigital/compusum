@@ -63,6 +63,9 @@ const ADMIN = { id: 'admin-1', name: 'Admin', email: 'admin@test.com', role: 'ad
 const EDITOR = { id: 'editor-1', name: 'Editor', email: 'e@test.com', role: 'editor' };
 const CUSTOMER_USER = { id: 'cust-x', name: 'Cliente', email: 'c@test.com', role: 'CUSTOMER' };
 
+// Asesor con cartera asignada pero SIN pedidos/cotizaciones en ningún periodo.
+const AGENT_D = { id: 'agent-d', name: 'Agente D', email: 'd@test.com', role: 'AGENT' };
+
 interface FixtureUser {
   id: string;
   name: string;
@@ -93,16 +96,25 @@ function monthsAgo(months: number): Date {
   return d;
 }
 
+/** "YYYY-MM" del mes SIGUIENTE al dado (para verificar continuidad de series). */
+function nextMonthKey(key: string): string {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 7);
+}
+
 const usersFixture: FixtureUser[] = [
   { id: 'agent-a', name: 'Agente A', role: 'AGENT', isActive: true, assignedAgentId: null },
   { id: 'agent-b', name: 'Agente B', role: 'AGENT', isActive: true, assignedAgentId: null },
   { id: 'agent-c', name: 'Agente C inactivo', role: 'AGENT', isActive: false, assignedAgentId: null },
+  { id: 'agent-d', name: 'Agente D', role: 'AGENT', isActive: true, assignedAgentId: null },
   // Cartera de A
   { id: 'c1', name: 'Cliente 1', role: 'CUSTOMER', isActive: true, assignedAgentId: 'agent-a' },
   { id: 'c2', name: 'Cliente 2', role: 'CUSTOMER', isActive: false, assignedAgentId: 'agent-a' },
   // Cartera de B (c5 fue reasignado: era de A)
   { id: 'c3', name: 'Cliente 3', role: 'CUSTOMER', isActive: true, assignedAgentId: 'agent-b' },
   { id: 'c5', name: 'Cliente reasignado', role: 'CUSTOMER', isActive: true, assignedAgentId: 'agent-b' },
+  // Cartera de D: asesor SIN producción histórica
+  { id: 'c6', name: 'Cliente 6', role: 'CUSTOMER', isActive: true, assignedAgentId: 'agent-d' },
   // Sin asignar
   { id: 'c4', name: 'Cliente 4', role: 'CUSTOMER', isActive: true, assignedAgentId: null },
 ];
@@ -435,7 +447,7 @@ describe('Reporting comercial — ADMIN/EDITOR', () => {
     expect(report.perAgent).toBeNull();
     // El selector sigue disponible para cambiar de asesor.
     expect(report.agentOptions).not.toBeNull();
-    expect(report.agentOptions!.map((a) => a.id)).toEqual(['agent-a', 'agent-b']);
+    expect(report.agentOptions!.map((a) => a.id)).toEqual(['agent-a', 'agent-b', 'agent-d']);
   });
 
   it('12. ADMIN: el bucket "Sin asesor" (agentId=null) aparece explícito, nunca descartado', async () => {
@@ -445,6 +457,19 @@ describe('Reporting comercial — ADMIN/EDITOR', () => {
     expect(nullRow!.ordersCount).toBe(1); // o7
     expect(nullRow!.ordersTotal).toBe(300);
     expect(nullRow!.customersCount).toBe(1); // c4
+  });
+
+  it('12b. asesor con cartera asignada pero 0 producción en el periodo: aparece en el desglose ADMIN con SU nombre (no genérico)', async () => {
+    // AGENT_D tiene a c6 asignado y ninguna orden en ningún periodo.
+    const report = await buildCommercialReport(ADMIN, { preset: '30d', asesorId: null });
+    const rowD = report.perAgent!.find((row) => row.agentId === 'agent-d');
+    expect(rowD).toBeDefined();
+    expect(rowD!.agentName).toBe('Agente D');
+    expect(rowD!.customersCount).toBe(1); // c6
+    expect(rowD!.ordersCount).toBe(0);
+    expect(rowD!.quotesCount).toBe(0);
+    expect(rowD!.ordersTotal).toBe(0);
+    expect(rowD!.quotesTotal).toBe(0);
   });
 
   it('13. EDITOR conserva la visión global completa', async () => {
@@ -485,6 +510,37 @@ describe('Acceso a /admin/reportes', () => {
 // ---------------------------------------------------------------------------
 
 describe('Reporting comercial — periodos sobre Order.createdAt', () => {
+  it('15b. meses sin actividad aparecen EXPLÍCITAMENTE con ceros: la serie mensual es continua (densificada)', async () => {
+    // AGENT A en "all": actividad en el mes actual y hace 8 meses (o5);
+    // los meses intermedios no tienen actividad y deben existir con ceros.
+    const report = await buildCommercialReport(AGENT_A, { preset: 'all', asesorId: null });
+    const series = report.monthly;
+
+    expect(series.length).toBeGreaterThan(2);
+
+    // Continuidad: cada mes es exactamente el siguiente del anterior (sin huecos).
+    for (let i = 1; i < series.length; i += 1) {
+      expect(nextMonthKey(series[i - 1].month)).toBe(series[i].month);
+    }
+
+    // Al menos un mes intermedio sin actividad, con los cuatro valores en cero.
+    const middle = series.slice(1, -1);
+    expect(
+      middle.some(
+        (p) =>
+          p.ordersCount === 0 &&
+          p.ordersTotal === 0 &&
+          p.quotesCount === 0 &&
+          p.quotesTotal === 0
+      )
+    ).toBe(true);
+
+    // La densificación no altera los totales de la serie.
+    expect(series.reduce((sum, p) => sum + p.ordersCount, 0)).toBe(4);
+    expect(series.reduce((sum, p) => sum + p.quotesCount, 0)).toBe(2);
+    expect(series.reduce((sum, p) => sum + p.ordersTotal, 0)).toBe(100 + 200 + 999 + 150);
+  });
+
   it('15. el periodo filtra SOLO por createdAt (nunca updatedAt) y con preset válido', async () => {
     // Presets -> fecha de corte.
     expect(resolvePeriodStart('30d')).toBeInstanceOf(Date);

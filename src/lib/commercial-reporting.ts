@@ -168,7 +168,40 @@ interface MonthlyRow {
   total: number;
 }
 
-function buildMonthlySeries(rows: MonthlyRow[]): MonthlyActivityPoint[] {
+function monthKeyOf(date: Date): string {
+  return date.toISOString().slice(0, 7);
+}
+
+/** Secuencia ascendente y CONTINUA de meses "YYYY-MM" entre start y end. */
+function monthSequence(startKey: string, endKey: string): string[] {
+  const months: string[] = [];
+  let [year, month] = startKey.split("-").map(Number);
+  const [endYear, endMonth] = endKey.split("-").map(Number);
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    months.push(`${year}-${String(month).padStart(2, "0")}`);
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+  return months;
+}
+
+/**
+ * Serie mensual DENSIFICADA: los meses sin actividad aparecen explícitamente
+ * con ceros para que la evolución no parezca continua cuando no lo es.
+ * - Presets con rango (30d/90d/6m): todos los meses desde el mes de inicio
+ *   del periodo hasta el mes actual.
+ * - "all": desde el primer hasta el último mes con actividad observada.
+ * Sin actividad observada => serie vacía (la UI muestra su empty state).
+ */
+function buildMonthlySeries(
+  rows: MonthlyRow[],
+  preset: ReportingPeriodPreset,
+  periodFrom: Date | null,
+  now: Date = new Date()
+): MonthlyActivityPoint[] {
   const byMonth = new Map<string, MonthlyActivityPoint>();
   for (const row of rows) {
     const key = new Date(row.month).toISOString().slice(0, 7);
@@ -190,8 +223,31 @@ function buildMonthlySeries(rows: MonthlyRow[]): MonthlyActivityPoint[] {
     }
     byMonth.set(key, point);
   }
-  return Array.from(byMonth.values()).sort((a, b) =>
-    a.month.localeCompare(b.month)
+
+  if (byMonth.size === 0) {
+    return [];
+  }
+
+  let startKey: string;
+  let endKey: string;
+  if (preset === "all") {
+    const keys = Array.from(byMonth.keys()).sort();
+    startKey = keys[0];
+    endKey = keys[keys.length - 1];
+  } else {
+    startKey = monthKeyOf(periodFrom ?? now);
+    endKey = monthKeyOf(now);
+  }
+
+  return monthSequence(startKey, endKey).map(
+    (month) =>
+      byMonth.get(month) ?? {
+        month,
+        ordersCount: 0,
+        ordersTotal: 0,
+        quotesCount: 0,
+        quotesTotal: 0,
+      }
   );
 }
 
@@ -332,9 +388,16 @@ export async function buildCommercialReport(
         }),
       ]);
 
+      // Nombres para TODO asesor presente en el desglose: producción del
+      // periodo O cartera actual. Un asesor con clientes asignados pero sin
+      // pedidos/cotizaciones en el periodo sigue apareciendo (producción 0)
+      // y debe conservar su nombre, no un genérico.
       const agentIds = new Set<string>();
       for (const row of productionByAgent) {
         if (row.agentId) agentIds.add(row.agentId);
+      }
+      for (const row of portfolioByAgent) {
+        if (row.assignedAgentId) agentIds.add(row.assignedAgentId);
       }
       const nameRows = agentIds.size
         ? await db.user.findMany({
@@ -417,7 +480,7 @@ export async function buildCommercialReport(
         count: s._count._all,
       }))
     ),
-    monthly: buildMonthlySeries(monthlyRows),
+    monthly: buildMonthlySeries(monthlyRows, options.preset, periodFrom),
     recent: recentOrders,
     perAgent,
     agentOptions,
