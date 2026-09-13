@@ -20,6 +20,7 @@ import {
   Upload,
   Users,
   Tag,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isAgentRole } from "@/lib/roles";
@@ -43,6 +44,9 @@ const navigation: NavItem[] = [
   { name: "Pedidos", href: "/admin/pedidos", icon: ClipboardList },
   { name: "Envíos", href: "/admin/envios", icon: Truck, adminOnly: true },
   { name: "Clientes", href: "/admin/clientes", icon: Users },
+  // Reportes comerciales: visible para todo el backoffice; el alcance
+  // (self vs global) lo impone el servidor en /admin/reportes.
+  { name: "Reportes", href: "/admin/reportes", icon: BarChart3 },
   { name: "Perfiles de precio", href: "/admin/perfiles-precio", icon: Tag, adminOnly: true },
   { name: "Importar CSV", href: "/admin/importar", icon: Upload, adminOnly: true },
   { name: "Páginas", href: "/admin/paginas", icon: FileText, adminOnly: true },
