@@ -2,9 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import { isValidOrderStatus } from "@/lib/order-status";
+import { assertQuoteShareable, CommercialOrderError } from "@/lib/commercial-order";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
+}
+
+// Fase 4B: aborts the status-change transaction carrying a ready-made
+// response (Prisma rolls back automatically on throw; zero partial writes).
+class OrderPatchAbort extends Error {
+  constructor(public readonly response: NextResponse) {
+    super("order-patch-abort");
+  }
 }
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
@@ -93,41 +102,158 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (cityId !== undefined) updateData.cityId = cityId;
     if (routeId !== undefined) updateData.routeId = routeId;
 
-    // If items provided, replace all and recalculate subtotal
+    // Legacy `items` replacement: the payload is only PREPARED here. The
+    // actual writes run inside the transaction below, so a status change that
+    // the share guard rejects can never leave the lines half-replaced.
+    let itemRows:
+      | {
+          orderId: string;
+          productId: string;
+          productName: string;
+          productSku: string | null;
+          quantity: number;
+          unitPrice: number | null;
+        }[]
+      | null = null;
     if (Array.isArray(items)) {
-      await db.orderItem.deleteMany({ where: { orderId: id } });
-      await db.orderItem.createMany({
-        data: items.map((item: { productId: string; productName: string; productSku?: string; quantity: number; unitPrice?: number }) => ({
+      itemRows = items.map(
+        (item: {
+          productId: string;
+          productName: string;
+          productSku?: string;
+          quantity: number;
+          unitPrice?: number;
+        }) => ({
           orderId: id,
           productId: item.productId,
           productName: item.productName,
           productSku: item.productSku || null,
           quantity: item.quantity,
           unitPrice: item.unitPrice ?? null,
-        })),
-      });
+        })
+      );
       updateData.subtotal = items.reduce(
-        (sum: number, item: { quantity: number; unitPrice?: number }) => sum + item.quantity * (item.unitPrice || 0),
-        0,
+        (sum: number, item: { quantity: number; unitPrice?: number }) =>
+          sum + item.quantity * (item.unitPrice || 0),
+        0
       );
     }
 
-    const updated = await db.order.update({
-      where: { id },
-      data: updateData,
-      include: { items: true },
-    });
+    // Fase 4B: status changes are transactional under a row lock: the update
+    // and its history row are written atomically, `fromStatus` is read
+    // POST-lock (never from the stale pre-lock read) and an incomplete quote
+    // can never be shared or confirmed.
+    let updated;
+    if (status !== undefined) {
+      try {
+        updated = await db.$transaction(async (tx) => {
+          const locked = await tx.$queryRaw<
+            { id: string; status: string; requestType: string; agentId: string | null }[]
+          >`
+            SELECT id, status, "requestType", "agentId" FROM "Order" WHERE id = ${id} FOR UPDATE`;
 
-    // Only create history when status actually changes
-    if (status && status !== order.status) {
-      await db.orderStatusHistory.create({
-        data: {
-          orderId: id,
-          fromStatus: order.status,
-          toStatus: status,
-          changedBy: user?.name || "admin",
-          note: note || null,
-        },
+          // Deleted between the initial read and the lock.
+          if (!locked || locked.length === 0) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                { success: false, error: "Pedido no encontrado" },
+                { status: 404 }
+              )
+            );
+          }
+
+          // AGENT ownership is re-checked on the LOCKED row: the pre-lock
+          // read can be stale if the order was reassigned in between.
+          // Fail-closed 404 (no existence leak), zero writes.
+          if (isAgentRole(user!.role) && locked[0].agentId !== user!.id) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                { success: false, error: "Pedido no encontrado" },
+                { status: 404 }
+              )
+            );
+          }
+          const postLockStatus = locked[0].status;
+
+          // Redundant by construction (validated before the transaction), but
+          // the target is re-checked against the authoritative state.
+          if (!isValidOrderStatus(status)) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                {
+                  success: false,
+                  error: `Estado inválido. Valores permitidos: solicitado, compartido, recibido.`,
+                },
+                { status: 400 }
+              )
+            );
+          }
+
+          // Legacy line replacement INSIDE the transaction: it must be visible
+          // to the share guard (which reads the lines under the same tx) and
+          // must roll back together with a rejected status change.
+          if (itemRows) {
+            await tx.orderItem.deleteMany({ where: { orderId: id } });
+            await tx.orderItem.createMany({ data: itemRows });
+          }
+
+          // Commercial guard: an incomplete quote (no lines, or any line
+          // without a positive price) must never be shared or confirmed.
+          // Shared implementation with the manual webhook route.
+          try {
+            await assertQuoteShareable(tx, id, status);
+          } catch (guardError) {
+            if (guardError instanceof CommercialOrderError && guardError.status === 400) {
+              throw new OrderPatchAbort(
+                NextResponse.json(
+                  { success: false, error: guardError.message },
+                  { status: 400 }
+                )
+              );
+            }
+            throw guardError;
+          }
+
+          const result = await tx.order.update({
+            where: { id },
+            data: updateData,
+            include: { items: true },
+          });
+
+          // Same observable semantics as before: history only when the status
+          // actually changes — but now compared against the POST-lock status.
+          if (status !== postLockStatus) {
+            await tx.orderStatusHistory.create({
+              data: {
+                orderId: id,
+                fromStatus: postLockStatus,
+                toStatus: status,
+                changedBy: user?.name || "admin",
+                note: note || null,
+              },
+            });
+          }
+
+          return result;
+        });
+      } catch (txError) {
+        if (txError instanceof OrderPatchAbort) {
+          return txError.response;
+        }
+        throw txError;
+      }
+    } else {
+      // No status change: the line replacement is still atomic on its own.
+      updated = await db.$transaction(async (tx) => {
+        if (itemRows) {
+          await tx.orderItem.deleteMany({ where: { orderId: id } });
+          await tx.orderItem.createMany({ data: itemRows });
+        }
+        return tx.order.update({
+          where: { id },
+          data: updateData,
+          include: { items: true },
+        });
       });
     }
 
