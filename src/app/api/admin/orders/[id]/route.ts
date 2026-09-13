@@ -102,22 +102,40 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (cityId !== undefined) updateData.cityId = cityId;
     if (routeId !== undefined) updateData.routeId = routeId;
 
-    // If items provided, replace all and recalculate subtotal
+    // Legacy `items` replacement: the payload is only PREPARED here. The
+    // actual writes run inside the transaction below, so a status change that
+    // the share guard rejects can never leave the lines half-replaced.
+    let itemRows:
+      | {
+          orderId: string;
+          productId: string;
+          productName: string;
+          productSku: string | null;
+          quantity: number;
+          unitPrice: number | null;
+        }[]
+      | null = null;
     if (Array.isArray(items)) {
-      await db.orderItem.deleteMany({ where: { orderId: id } });
-      await db.orderItem.createMany({
-        data: items.map((item: { productId: string; productName: string; productSku?: string; quantity: number; unitPrice?: number }) => ({
+      itemRows = items.map(
+        (item: {
+          productId: string;
+          productName: string;
+          productSku?: string;
+          quantity: number;
+          unitPrice?: number;
+        }) => ({
           orderId: id,
           productId: item.productId,
           productName: item.productName,
           productSku: item.productSku || null,
           quantity: item.quantity,
           unitPrice: item.unitPrice ?? null,
-        })),
-      });
+        })
+      );
       updateData.subtotal = items.reduce(
-        (sum: number, item: { quantity: number; unitPrice?: number }) => sum + item.quantity * (item.unitPrice || 0),
-        0,
+        (sum: number, item: { quantity: number; unitPrice?: number }) =>
+          sum + item.quantity * (item.unitPrice || 0),
+        0
       );
     }
 
@@ -171,9 +189,17 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
             );
           }
 
-          // Commercial guard: an incomplete quote (any line without a
-          // positive price) must never be shared or confirmed. Shared
-          // implementation with the manual webhook route.
+          // Legacy line replacement INSIDE the transaction: it must be visible
+          // to the share guard (which reads the lines under the same tx) and
+          // must roll back together with a rejected status change.
+          if (itemRows) {
+            await tx.orderItem.deleteMany({ where: { orderId: id } });
+            await tx.orderItem.createMany({ data: itemRows });
+          }
+
+          // Commercial guard: an incomplete quote (no lines, or any line
+          // without a positive price) must never be shared or confirmed.
+          // Shared implementation with the manual webhook route.
           try {
             await assertQuoteShareable(tx, id, status);
           } catch (guardError) {
@@ -217,10 +243,17 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         throw txError;
       }
     } else {
-      updated = await db.order.update({
-        where: { id },
-        data: updateData,
-        include: { items: true },
+      // No status change: the line replacement is still atomic on its own.
+      updated = await db.$transaction(async (tx) => {
+        if (itemRows) {
+          await tx.orderItem.deleteMany({ where: { orderId: id } });
+          await tx.orderItem.createMany({ data: itemRows });
+        }
+        return tx.order.update({
+          where: { id },
+          data: updateData,
+          include: { items: true },
+        });
       });
     }
 

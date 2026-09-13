@@ -125,6 +125,25 @@ describe('Manual webhook share: incomplete-quote guard', () => {
     expect(mockDb.orderStatusHistory.create).not.toHaveBeenCalled();
   });
 
+  it('cotización con CERO líneas => 400, webhook NO enviado, cero writes', async () => {
+    const order = makeOrder();
+    installDb(order, []); // sin líneas: incompleta (antes se colaba como shareable)
+    mockWebhook.buildWebhookPayload.mockResolvedValue(makePayload());
+
+    const res = await POST(req(), idParams('quote-1'));
+    const json = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(json).toEqual({
+      success: false,
+      error: 'La cotización tiene líneas sin precio y no puede compartirse o recibirse',
+    });
+
+    expect(mockWebhook.sendToWebhook).not.toHaveBeenCalled();
+    expect(mockDb.order.update).not.toHaveBeenCalled();
+    expect(mockDb.orderStatusHistory.create).not.toHaveBeenCalled();
+  });
+
   it('complete cotizacion => proceeds: webhook sent and status flipped to compartido', async () => {
     const order = makeOrder();
     installDb(order, [10000, 5000]);

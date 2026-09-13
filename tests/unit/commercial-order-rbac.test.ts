@@ -812,4 +812,119 @@ describe('Legacy PATCH /api/admin/orders/[id] — regresiones 4A intactas', () =
       changedBy: 'Admin',
     });
   });
+
+  it('ADMIN: `items` que dejan la cotización incompleta + status=compartido => 400 y CERO mutación parcial', async () => {
+    authState.currentUser = ADMIN;
+    const state = makeState();
+    seedBaseFixtures(state);
+    // Cotización originalmente COMPLETA (precio positivo).
+    seedOrder(state, {
+      id: 'quote-mut',
+      agentId: 'agent-a',
+      customerId: 'cust-a',
+      requestType: 'cotizacion',
+      items: [{ productId: 'p-eng', quantity: 2, unitPrice: 10000 }],
+    });
+    installDb(state);
+
+    const itemsBefore = JSON.parse(JSON.stringify(state.items.get('quote-mut')));
+    const subtotalBefore = state.orders.get('quote-mut')!.subtotal;
+    const statusBefore = state.orders.get('quote-mut')!.status;
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/quote-mut', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          status: 'compartido',
+          items: [{ productId: 'p-quote', productName: 'Sin precio', quantity: 2, unitPrice: null }],
+        }),
+      }),
+      idParams('quote-mut')
+    );
+    const json = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(json.success).toBe(false);
+    expect(json.error).toContain('líneas sin precio');
+
+    // Las líneas SÍ se intentaron reemplazar dentro de la transacción...
+    expect(mockDb.orderItem.deleteMany).toHaveBeenCalledWith({ where: { orderId: 'quote-mut' } });
+    expect(mockDb.orderItem.createMany).toHaveBeenCalledTimes(1);
+
+    // ...y el rollback dejó TODO intacto: líneas, subtotal, estado e historial.
+    expect(state.items.get('quote-mut')).toEqual(itemsBefore);
+    expect(state.orders.get('quote-mut')!.subtotal).toBe(subtotalBefore);
+    expect(state.orders.get('quote-mut')!.status).toBe(statusBefore);
+    expect(state.history).toHaveLength(0);
+    expect(mockDb.order.update).not.toHaveBeenCalled();
+    expect(mockDb.orderStatusHistory.create).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN: cotización con CERO líneas => no es compartible (400) y cero writes', async () => {
+    authState.currentUser = ADMIN;
+    const state = makeState();
+    seedBaseFixtures(state);
+    seedOrder(state, {
+      id: 'quote-zero',
+      agentId: 'agent-a',
+      customerId: 'cust-a',
+      requestType: 'cotizacion',
+      items: [],
+    });
+    installDb(state);
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/quote-zero', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'compartido' }),
+      }),
+      idParams('quote-zero')
+    );
+    const json = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(json.success).toBe(false);
+    expect(json.error).toContain('líneas sin precio');
+    expect(state.orders.get('quote-zero')!.status).toBe('solicitado');
+    expect(state.history).toHaveLength(0);
+    expect(mockDb.order.update).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN: `items` completos + status válido => contrato legacy intacto (reemplazo + compartido)', async () => {
+    authState.currentUser = ADMIN;
+    const state = makeState();
+    seedBaseFixtures(state);
+    installDb(state);
+
+    const res = await orderPATCH(
+      req('http://localhost/api/admin/orders/quote-a', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          status: 'compartido',
+          items: [{ productId: 'p-eng', productName: 'Con precio', quantity: 2, unitPrice: 10000 }],
+        }),
+      }),
+      idParams('quote-a')
+    );
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(state.orders.get('quote-a')!.status).toBe('compartido');
+    expect(state.orders.get('quote-a')!.subtotal).toBe(20000);
+    expect(state.items.get('quote-a')).toHaveLength(1);
+    expect(state.items.get('quote-a')![0]).toMatchObject({
+      productId: 'p-eng',
+      quantity: 2,
+      unitPrice: 10000,
+    });
+    expect(state.history).toHaveLength(1);
+    expect(state.history[0]).toMatchObject({
+      fromStatus: 'solicitado',
+      toStatus: 'compartido',
+    });
+  });
 });

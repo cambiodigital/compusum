@@ -277,11 +277,31 @@ export function authorizeCommercialAccess(
 }
 
 /**
+ * SINGLE SOURCE OF TRUTH for quote completeness: a quote is complete only when
+ * it has at least one line and EVERY line carries a positive price. An empty
+ * quote is therefore incomplete (the previous `items.some(...)` check reported
+ * `false` for zero lines and wrongly treated it as shareable).
+ *
+ * Used by every writer that can share, confirm or convert a quote: the admin
+ * PATCH status change, the manual webhook route, the checkout auto-share and
+ * the quote -> order conversion.
+ */
+export function isQuoteComplete(
+  items: readonly { unitPrice: number | null }[]
+): boolean {
+  return (
+    items.length > 0 &&
+    items.every((item) => item.unitPrice != null && item.unitPrice > 0)
+  );
+}
+
+/**
  * Share guard shared by the admin PATCH status change and the manual webhook
- * route: a "cotizacion" with any line lacking a positive price must never be
- * shared ("compartido") or confirmed ("recibido"). Silent no-op for any other
- * target status and for missing orders (the caller's own 404 handling stays
- * authoritative). Throws CommercialOrderError (400) on an incomplete quote.
+ * route: a "cotizacion" that is not complete (no lines, or any line without a
+ * positive price) must never be shared ("compartido") or confirmed
+ * ("recibido"). Silent no-op for any other target status and for missing
+ * orders (the caller's own 404 handling stays authoritative). Throws
+ * CommercialOrderError (400) on an incomplete quote.
  */
 export async function assertQuoteShareable(
   client: DbClient,
@@ -304,11 +324,35 @@ export async function assertQuoteShareable(
     where: { orderId },
     select: { unitPrice: true },
   });
-  if (items.some((item) => item.unitPrice == null || item.unitPrice <= 0)) {
+  if (!isQuoteComplete(items)) {
     throw badRequest(
       "La cotización tiene líneas sin precio y no puede compartirse o recibirse"
     );
   }
+}
+
+/**
+ * AUTO-SHARE policy applied right after a successful creation webhook: a plain
+ * "pedido" always shares; a "cotizacion" only when it is complete. The caller
+ * passes the authoritative POST-LOCK row and the lines are re-read through the
+ * same client, so the decision is derived server-side from the persisted Order
+ * and its OrderItems — never from the browser's requestType, completeness
+ * flags or subtotal. An incomplete quote stays "solicitado" and therefore
+ * remains editable in the commercial panel.
+ */
+export async function canAutoShareAfterWebhook(
+  client: DbClient,
+  order: { id: string; requestType: string }
+): Promise<boolean> {
+  if (order.requestType !== "cotizacion") {
+    return true;
+  }
+
+  const items = await client.orderItem.findMany({
+    where: { orderId: order.id },
+    select: { unitPrice: true },
+  });
+  return isQuoteComplete(items);
 }
 
 /**
@@ -427,8 +471,29 @@ export async function buildCommercialPreview(
 
   const comparisons = buildOrderItemPriceComparisons(items, productsById, prices);
 
+  // Aggregated requested totals per stock key, so the advisory validation below
+  // matches the very same pass a save/convert would run.
+  const requestedTotalsByKey = new Map<string, number>();
+  for (const item of items) {
+    const key = stockKey(item.productId, item.variantId);
+    requestedTotalsByKey.set(key, (requestedTotalsByKey.get(key) || 0) + item.quantity);
+  }
+
   const lines: CommercialPreviewLine[] = comparisons.map((comparison) => {
     const product = productsById.get(comparison.productId);
+    // Availability mirrors the conversion gate (active product/variant, not
+    // "agotado", minimum wholesale quantity, aggregated stock) instead of only
+    // "isActive", so the panel never shows "Disponible" on a line that a
+    // conversion would reject.
+    const issue = lineValidationIssue(
+      {
+        productId: comparison.productId,
+        variantId: comparison.variantId,
+        quantity: comparison.quantity,
+      },
+      productsById,
+      requestedTotalsByKey
+    );
     return {
       productId: comparison.productId,
       variantId: comparison.variantId,
@@ -444,14 +509,13 @@ export async function buildCommercialPreview(
       priceDifference: comparison.priceDifference,
       currentStockQuantity: comparison.currentStockQuantity,
       minQuantity: product?.minWholesaleQty || 1,
-      availability: comparison.availability,
+      availability: issue ? "unavailable" : "available",
       snapshotLineTotal: (comparison.historicalUnitPrice ?? 0) * comparison.quantity,
       engineLineTotal: (comparison.currentUnitPrice ?? 0) * comparison.quantity,
     };
   });
 
-  const isComplete =
-    items.length > 0 && items.every((i) => i.unitPrice != null && i.unitPrice > 0);
+  const isComplete = isQuoteComplete(items);
   const canEdit = order.status === "solicitado";
 
   return {
@@ -588,9 +652,9 @@ export async function previewCommercialLines(
   });
 
   const subtotal = computedLines.reduce((sum, line) => sum + line.lineTotal, 0);
-  const isComplete =
-    computedLines.length > 0 &&
-    computedLines.every((line) => line.finalUnitPrice != null && line.finalUnitPrice > 0);
+  const isComplete = isQuoteComplete(
+    computedLines.map((line) => ({ unitPrice: line.finalUnitPrice }))
+  );
 
   return {
     orderId: order.id,
@@ -883,9 +947,7 @@ export async function convertQuoteToOrder(
       throw badRequest("La cotización no tiene líneas para convertir.");
     }
 
-    const incomplete = items.find(
-      (item) => item.unitPrice == null || item.unitPrice <= 0
-    );
+    const incomplete = !isQuoteComplete(items);
     if (incomplete) {
       throw badRequest(
         "La cotización tiene líneas sin precio: complete los precios antes de convertirla en pedido."

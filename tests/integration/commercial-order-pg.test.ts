@@ -597,6 +597,42 @@ d('recalculate en PostgreSQL: re-precia la línea del motor y conserva la negoci
   await db.order.delete({ where: { id: order.id } });
 }, 30000);
 
+d('CHECKOUT DEJA COTIZACIÓN INCOMPLETA: sigue "solicitado", el asesor la completa y convierte', async () => {
+  // Réplica exacta del estado que deja el auto-share corregido: cotización con
+  // una línea sin precio y status 'solicitado' => editable por el asesor.
+  const order = await seedOrder({
+    suffix: 'incomplete-edit',
+    agentId: agentAId,
+    customerId: customerAId,
+    requestType: 'cotizacion',
+    items: [{ productId: engineProductId, quantity: 2, unitPrice: null }],
+  });
+  const historyBefore = await historyCount(order.id);
+
+  // Editable: el save reemplaza las líneas y persiste el precio cotizado.
+  const saved = await saveCommercialCalculation({
+    orderId: order.id,
+    actor: agentAActor(),
+    lines: [{ productId: quoteProductId, quantity: 1, quotedUnitPrice: 8500 }],
+  });
+  expect(saved.isComplete).toBe(true);
+  expect(saved.canConvert).toBe(true);
+  expect(saved.storedSubtotal).toBe(8500);
+
+  // Y recién entonces la conversión es posible.
+  const converted = await convertQuoteToOrder({ orderId: order.id, actor: agentAActor() });
+  expect(converted.requestType).toBe('pedido');
+
+  const after = await db.order.findUnique({ where: { id: order.id }, include: { items: true } });
+  expect(after!.requestType).toBe('pedido');
+  expect(after!.subtotal).toBe(8500);
+  expect(after!.items).toHaveLength(1);
+  expect(after!.items[0].unitPrice).toBe(8500);
+  expect(await historyCount(order.id)).toBe(historyBefore + 2);
+
+  await db.order.delete({ where: { id: order.id } });
+}, 30000);
+
 d('PRODUCTO DESACTIVADO entre preview y convert => convert 400 y cero writes', async () => {
   const order = await seedOrder({
     suffix: 'deactivate',
