@@ -3,6 +3,11 @@ import { db } from "@/lib/db";
 import { requireBackofficeApi, isAgentRole } from "@/lib/auth";
 import { isValidOrderStatus } from "@/lib/order-status";
 import { assertQuoteShareable, CommercialOrderError } from "@/lib/commercial-order";
+import {
+  parseCityIdMutation,
+  resolveShippingRouteForCity,
+  CityResolutionError,
+} from "@/lib/city-route";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -70,7 +75,9 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     }
 
     const { id } = await params;
-    const { status, note, items, customerName, customerEmail, customerPhone, customerCompany, cityId, routeId } = body;
+    // Fase 5A: `routeId` ya NO se acepta del body (ningún caller legítimo lo
+    // envía): la ruta se DERIVA server-side de la ciudad validada.
+    const { status, note, items, customerName, customerEmail, customerPhone, customerCompany, cityId } = body;
 
     // AGENT: solo pedidos propios (404 idéntico si no lo es).
     const order = await db.order.findFirst({
@@ -99,8 +106,30 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (customerEmail !== undefined) updateData.customerEmail = customerEmail;
     if (customerPhone !== undefined) updateData.customerPhone = customerPhone;
     if (customerCompany !== undefined) updateData.customerCompany = customerCompany;
-    if (cityId !== undefined) updateData.cityId = cityId;
-    if (routeId !== undefined) updateData.routeId = routeId;
+
+    // Fase 5A — ciudad/ruta en tándem con la fuente única
+    // (resolveShippingRouteForCity): omitido conserva, null limpia ambos,
+    // ciudad válida fija cityId + ruta server-side de esa ciudad; inválida o
+    // inactiva => 400 controlado (nunca P2003 => 500). RBAC intacto: AGENT
+    // sigue limitado a SUS pedidos (re-check bajo lock más abajo).
+    if (cityId !== undefined) {
+      try {
+        const cityMutation = parseCityIdMutation(cityId);
+        if (cityMutation.action === "clear") {
+          updateData.cityId = null;
+          updateData.routeId = null;
+        } else if (cityMutation.action === "set") {
+          const resolved = await resolveShippingRouteForCity(cityMutation.cityId);
+          updateData.cityId = resolved.city.id;
+          updateData.routeId = resolved.route?.id ?? null;
+        }
+      } catch (error) {
+        if (error instanceof CityResolutionError) {
+          return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+        }
+        throw error;
+      }
+    }
 
     // Legacy `items` replacement: the payload is only PREPARED here. The
     // actual writes run inside the transaction below, so a status change that

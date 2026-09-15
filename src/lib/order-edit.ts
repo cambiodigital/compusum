@@ -4,6 +4,10 @@ import { normalizeEmail, normalizePhone, type SessionUserRef } from "./checkout"
 import { validateAndPriceItems, CartValidationError } from "./cart-validation";
 import { resolveServerPricingCustomer } from "./pricing";
 import {
+  resolveShippingRouteForCity,
+  CityResolutionError,
+} from "./city-route";
+import {
   authorizeOrderAccess,
   OrderAccessError,
   type OrderViewer,
@@ -27,8 +31,10 @@ import { isCustomerEditableStatus, isValidRequestType } from "./order-status";
  *      edición con webhooks/cambios de estado concurrentes.
  *   3. Re-chequeo del estado sobre la lectura bloqueada + `updateMany`
  *      condicionado a `status = 'solicitado'` (doble guarda anti-carrera).
- *   4. `cityId` se valida contra el maestro de ciudades: un valor inválido
- *      responde 400 limpio en vez de un P2003 posterior.
+ *   4. `cityId` y `routeId` van SIEMPRE en tándem (Fase 5A): cambiar la
+ *      ciudad recalcula la ruta server-side de la nueva ciudad; limpiar la
+ *      ciudad limpia la ruta. Un valor inválido responde 400 limpio en vez
+ *      de un P2003 posterior, y nunca queda cityId=B con la ruta de A.
  *
  * Promoción cotización → pedido (sin items nuevos en el body): re-valida
  * TODAS las líneas existentes en modo 'pedido' (exigen precio > 0); si
@@ -132,8 +138,9 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
   }
   const company = text(body.customerCompany, 200);
   if (company !== undefined) updateData.customerCompany = company;
+  // Fase 5A: cityId y routeId se resuelven EN TÁNDEM dentro de la tx
+  // (bloque c) — aquí solo se parsea el valor crudo del body.
   const cityIdUpdate = text(body.cityId, 64);
-  if (cityIdUpdate !== undefined) updateData.cityId = cityIdUpdate;
   const notes = text(body.notes, 1000);
   if (notes !== undefined) updateData.notes = notes;
 
@@ -208,14 +215,30 @@ export async function editCustomerOrder(input: EditCustomerOrderInput) {
     // El nombre vacío conserva el nombre registrado en el estado POST-lock.
     if (name !== undefined) updateData.customerName = name || locked[0].customerName;
 
-    // c) cityId válido contra el maestro de ciudades (evita el P2003 tarde,
-    //    cuando las líneas ya habrían sido reescritas).
-    if (cityIdUpdate !== undefined && cityIdUpdate !== null) {
-      const city = await tx.city.findUnique({
-        where: { id: cityIdUpdate },
-      });
-      if (!city) {
-        throw new OrderEditError("Ciudad no válida", 400);
+    // c) Fase 5A — ciudad y ruta SIEMPRE en tándem (fuente única
+    //    resolveShippingRouteForCity), dentro de la tx bajo el lock:
+    //      - cityId omitido  => conserva cityId Y routeId;
+    //      - cityId null     => limpia cityId Y routeId;
+    //      - ciudad válida   => cityId = B y routeId = ruta server-side de B
+    //        (null si su ruta está inactiva o con el corte cerrado, la MISMA
+    //        regla con la que el checkout crea el pedido).
+    //    Nunca queda cityId=B con routeId=ruta de la ciudad anterior. Una
+    //    ciudad inválida/inactiva aborta con 400 y CERO writes.
+    if (cityIdUpdate !== undefined) {
+      if (cityIdUpdate === null) {
+        updateData.cityId = null;
+        updateData.routeId = null;
+      } else {
+        try {
+          const resolved = await resolveShippingRouteForCity(cityIdUpdate, tx);
+          updateData.cityId = resolved.city.id;
+          updateData.routeId = resolved.route?.id ?? null;
+        } catch (error) {
+          if (error instanceof CityResolutionError) {
+            throw new OrderEditError(error.message, 400);
+          }
+          throw error;
+        }
       }
     }
 
