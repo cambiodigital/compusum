@@ -1,17 +1,20 @@
 import { db } from "./db";
 import type { City, ShippingRoute } from "@prisma/client";
+import { resolveDepartureAvailability } from "./route-schedule";
 
 /**
- * FUENTE ÚNICA ciudad → ruta (Fase 5A) — sin cambios de modelo.
+ * FUENTE ÚNICA ciudad → ruta (Fase 5A, cutoff recurrente desde 5B1).
  *
  * Reglas de integridad que unifica este helper:
  *   - La ciudad debe EXISTIR y estar ACTIVA para poder asignarse.
  *   - La ruta procede EXCLUSIVAMENTE de la relación server-side
  *     City.shippingRouteId (el navegador nunca propone routeId).
  *   - Una ruta inactiva NO se asigna (ruta efectiva = null).
- *   - El corte absoluto (cutOffTime) se respeta con la lógica actual;
- *     su reemplazo por un cutoff recurrente es Fase 5B y vive aquí y
- *     solo aquí: cambiar el modelo no debe requerir tocar llamadores.
+ *   - La elegibilidad por cutoff la decide el helper temporal central
+ *     (resolveDepartureAvailability): cutoff RECURRENTE en America/Bogota, con
+ *     roll-forward a la siguiente salida. El timestamp legacy `cutOffTime` ya
+ *     NO participa, así que un cutoff absoluto vencido no puede volver a
+ *     vaciar `routeId` en checkout/edición/PATCH admin.
  *
  * Consumers: checkout (order-create), edición de pedido (order-edit),
  * mutaciones de carrito (cart-mutations) y PATCH admin de pedidos.
@@ -56,10 +59,12 @@ type DbClient = typeof db | { city: typeof db.city };
  * Resuelve { city, route } desde un cityId YA clasificado como "set".
  *
  * Falla con CityResolutionError (400) si la ciudad no existe o está
- * inactiva. La ruta sale de la relación de la ciudad: null si no hay,
- * si está inactiva o si el corte actual (timestamp absoluto, Fase 5B)
- * ya pasó. El llamador decide qué hacer con ruta null (Order.routeId
- * null NO es error: es "sin ruta programada").
+ * inactiva. La ruta sale de la relación de la ciudad: null si no hay, si
+ * está inactiva, o si su schedule es inválido (fail-safe). Una ruta activa con
+ * schedule válido NUNCA se descarta por cutoff: si el de la salida más próxima
+ * ya cerró, el helper central avanza a la siguiente salida recurrente. El
+ * llamador decide qué hacer con ruta null (Order.routeId null NO es error: es
+ * "sin ruta programada").
  */
 export async function resolveShippingRouteForCity(
   cityId: string,
@@ -80,10 +85,19 @@ export async function resolveShippingRouteForCity(
     return { city, route: null };
   }
 
-  // Lógica de corte ACTUAL preservada (timestamp absoluto): se mantiene
-  // idéntica a la que usaba findBestRouteForCity. Fase 5B la reemplaza
-  // por un cutoff recurrente SIN cambiar la firma de este helper.
-  if (route.cutOffTime && new Date(route.cutOffTime) <= now) {
+  // Elegibilidad delegada a la fuente temporal única (cutoff recurrente con
+  // roll-forward). El legacy `cutOffTime` NO se lee aquí.
+  const availability = resolveDepartureAvailability(
+    {
+      departureDaysOfWeek: route.departureDaysOfWeek,
+      cutoffDaysBefore: route.cutoffDaysBefore,
+      cutoffLocalTime: route.cutoffLocalTime,
+    },
+    now
+  );
+
+  // Fail-safe: un schedule inválido no habilita la asignación de ruta.
+  if (availability.status === "misconfigured") {
     return { city, route: null };
   }
 

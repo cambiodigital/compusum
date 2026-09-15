@@ -34,7 +34,10 @@ interface DepartmentData {
 }
 
 interface ShippingEstimate {
-  status?: 'available' | 'cutoff_passed' | 'unavailable';
+  // Fase 5B1: `cutoff_passed` desaparece del contrato. Una ruta semanal con
+  // cutoff vencido ya NO se bloquea: avanza a la siguiente salida (roll-forward).
+  // `misconfigured` = la ruta tiene una programación inválida.
+  status?: 'available' | 'unavailable' | 'misconfigured';
   message: string;
 }
 
@@ -210,7 +213,7 @@ export function CitySelector() {
           className={`rounded-lg border p-3 ${
             estimate.status === 'available'
               ? 'border-emerald-200 bg-emerald-50'
-              : estimate.status === 'cutoff_passed'
+              : estimate.status === 'misconfigured'
               ? 'border-amber-200 bg-amber-50'
               : 'border-slate-200 bg-slate-50'
           }`}
@@ -219,7 +222,7 @@ export function CitySelector() {
             className={`text-sm ${
               estimate.status === 'available'
                 ? 'text-emerald-800'
-                : estimate.status === 'cutoff_passed'
+                : estimate.status === 'misconfigured'
                 ? 'text-amber-800'
                 : 'text-slate-700'
             }`}

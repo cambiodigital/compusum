@@ -1,5 +1,21 @@
 # 📦 Sistema de Rutas por Día de Semana - Ejemplos de Checkout
 
+> ⚠️ **Nota de vigencia (Fase 5B1).** Los escenarios de abajo se escribieron para
+> un modelo de "corte a una hora del mismo día" que **nunca llegó a
+> implementarse** (no existe hora de salida en el sistema). El modelo vigente es:
+>
+> - **Cutoff recurrente semanal**: `cutoffDaysBefore` (0–6 días) +
+>   `cutoffLocalTime` (`HH:mm`), ambos en **`America/Bogota`**. El cutoff de cada
+>   salida es `salida − cutoffDaysBefore días` a las `cutoffLocalTime`.
+> - **Sin cutoff** (`null` + `null`) = la ruta no tiene corte y sale según sus
+>   días; el día de salida sigue elegible durante **todo** su día civil en Bogotá.
+> - **Roll-forward**: si el cutoff de la salida más próxima ya cerró, el pedido
+>   viaja en la **siguiente** salida. Una ruta semanal válida nunca queda cerrada
+>   permanentemente (el estado `cutoff_passed` fue retirado en 5B1).
+> - Los textos "Te quedan N horas…" de los ejemplos **no** son el contrato actual.
+>
+> Para el contrato exacto ver `docs/shipping/api-reference.md`.
+
 ## Cómo funciona ahora
 
 ### ✅ Antes (Modelo antiguo - RETIRADO)
@@ -104,12 +120,15 @@ La siguiente salida disponible es: JUEVES 04/04, en 1 día.
 │                                                              │
 │ Estimación (min-max días): [2] [4]                         │
 │                                                              │
-│ Corte de pedidos: [25/03/2026 10:00 AM]                   │
-│                                                              │
 │ Transportadora: [Servientrega]                             │
+│                                                              │
+│ Corte recurrente: [3] días antes a las [14:00] — America/Bogota  │
 │                                                              │
 │ 📍 Días de salida (select all that apply)                  │
 │ ☐ Dom  ☑ Lun  ☑ Mar  ☑ Mié  ☐ Jue  ☐ Vie  ☐ Sáb       │
+│                                                              │
+│ Próxima salida: lunes 06/04                                   │
+│ Corte: viernes 03/04 a las 14:00 — America/Bogota             │
 │                                                              │
 │ [Actualizar ruta] ✓                                        │
 └─────────────────────────────────────────────────────────────┘
@@ -129,8 +148,9 @@ const CheckoutFlow = () => {
     if (selectedCity?.id) {
       const estimate = await getShippingEstimation(selectedCity.id);
       // estimate.message = "✓ La ruta sale HOY (miércoles)..."
-      // estimate.nextDepartureDate = 2026-04-02T00:00:00Z
+      // estimate.nextDepartureCivilDate = '2026-04-02'  // YYYY-MM-DD en America/Bogota
       // estimate.daysUntilDeparture = 0
+      // estimate.skippedDeparture = false                // true si hubo roll-forward
       setShippingInfo(estimate);
     }
   }, [selectedCity]);
@@ -172,4 +192,15 @@ const CheckoutFlow = () => {
 
 - Admin panel: `http://localhost:3000/admin/envios`
 - Checkout: `http://localhost:3000/checkout` (requiere carrito)
-- API de estimación: `GET /api/shipping/estimate?cityId=<id>`
+- API de estimación: `POST /api/shipping/estimate` con body `{ "cityId": "<id>" }`
+  (el handler exporta únicamente `POST`; la referencia anterior a `GET` era drift)
+
+## 🧪 Checklist adicional de cutoff recurrente (Fase 5B1)
+
+- [ ] Ruta con `cutoffDaysBefore` y `cutoffLocalTime` vacíos ⇒ sin corte: la
+      salida del día en curso sigue elegible todo el día (hora Bogotá)
+- [ ] Configurar `3` días antes a las `14:00` y verificar el preview del admin:
+      debe mostrar el viernes anterior a las 14:00 — America/Bogota
+- [ ] Dejar sólo los días o sólo la hora ⇒ error controlado (`partial_cutoff`)
+- [ ] Con el cutoff de la salida más próxima ya vencido, el checkout sigue
+      asignando `routeId` y el pedido viaja en la **siguiente** salida

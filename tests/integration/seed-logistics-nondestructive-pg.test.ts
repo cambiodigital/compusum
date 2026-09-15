@@ -186,6 +186,10 @@ describe.skipIf(!HAS_POSTGRES)('SEED LOGÍSTICO NO DESTRUCTIVO (Fase 5B0)', () =
       capacity: 42,
       cutOffTime: new Date('2026-03-25T14:00:00.000Z'),
       departureDate: new Date('2026-03-31T00:00:00.000Z'),
+      // Fase 5B1: cutoff recurrente. El seed NO debe tocarlo — así un redeploy
+      // no puede revertir la programación cargada desde /admin/envios.
+      cutoffDaysBefore: 3,
+      cutoffLocalTime: '14:00',
     };
     await scratch.shippingRoute.update({ where: { id: route.id }, data: custom });
 
@@ -205,6 +209,9 @@ describe.skipIf(!HAS_POSTGRES)('SEED LOGÍSTICO NO DESTRUCTIVO (Fase 5B0)', () =
     expect(after.sortOrder).toBe(custom.sortOrder);
     expect(after.isActive).toBe(custom.isActive);
     expect(after.capacity).toBe(custom.capacity);
+    // 5B1: el cutoff recurrente sobrevive al seed.
+    expect(after.cutoffDaysBefore).toBe(custom.cutoffDaysBefore);
+    expect(after.cutoffLocalTime).toBe(custom.cutoffLocalTime);
     // `departureDate` es legacy pero tampoco puede ser tocado por el seed.
     expect(after.cutOffTime?.toISOString()).toBe(custom.cutOffTime.toISOString());
     expect(after.departureDate?.toISOString()).toBe(custom.departureDate.toISOString());
@@ -294,6 +301,9 @@ describe.skipIf(!HAS_POSTGRES)('SEED LOGÍSTICO NO DESTRUCTIVO (Fase 5B0)', () =
     expect(eje.isActive).toBe(false);
     expect(eje.sortOrder).toBe(77);
     expect(eje.capacity).toBe(42);
+    // 5B1: el cutoff recurrente sigue intacto tras dos corridas del seed.
+    expect(eje.cutoffDaysBefore).toBe(3);
+    expect(eje.cutoffLocalTime).toBe('14:00');
 
     const ris = after.departments.find((d) => d.code === DEPARTMENT_UNDER_TEST)!;
     expect(ris.name).toBe('Risaralda Custom');
