@@ -426,7 +426,7 @@ console.log(out.join('\\n'));
 
   function runWithTZ(tz: string): string[] {
     // Se escribe a un archivo temporal y se ejecuta con `bun` (el mismo runtime
-    // de la suite): evita el quoting de shell en Windows y el límite de `-e`.
+    // de la suite): evita el quoting de shell y el límite de `-e`.
     // No se usa `process.execPath` porque bajo vitest apunta a node, que no
     // puede importar TypeScript en todas las versiones.
     const scriptFile = path.join(
@@ -434,13 +434,16 @@ console.log(out.join('\\n'));
       `compusum-tz-${process.pid}-${tz.replace(/\W/g, '_')}.ts`
     );
     writeFileSync(scriptFile, script, 'utf8');
+    // En Windows `bun` es un shim .cmd y necesita shell (con la ruta entre
+    // comillas por si el tmpdir tiene espacios). En Linux/macOS se pasa la ruta
+    // como argumento normal: con shell las comillas llegarían literales.
+    const useShell = process.platform === 'win32';
     try {
-      const res = spawnSync('bun', [`"${scriptFile}"`], {
+      const res = spawnSync('bun', [useShell ? `"${scriptFile}"` : scriptFile], {
         cwd: repoRoot,
         env: { ...process.env, TZ: tz },
         encoding: 'utf8',
-        // shell en Windows porque `bun` es un shim .cmd
-        shell: process.platform === 'win32',
+        shell: useShell,
       });
       if (res.status !== 0) {
         throw new Error(`subproceso falló (TZ=${tz}):\n${res.stderr}`);
