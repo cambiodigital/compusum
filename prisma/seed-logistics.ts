@@ -116,11 +116,35 @@ const shippingData: ShippingEntry[] = [
   },
 ];
 
+/**
+ * BOOTSTRAP NO DESTRUCTIVO (Fase 5B0)
+ *
+ * Este seed corre en CADA arranque del contenedor
+ * (docker-entrypoint.sh → prisma/bootstrap.ts → bun run seed), así que su
+ * único trabajo es COMPLETAR la configuración baseline que falte en una
+ * instalación nueva. NUNCA debe sobrescribir configuración logística que el
+ * administrador gestiona desde /admin/envios: un redeploy no puede revertir
+ * cambios legítimos ni reintroducir reasignaciones que la Fase 5A ya evitó.
+ *
+ * Contrato por entidad:
+ *   - ShippingRoute existente (por name) => se reutiliza su id, SIN writes.
+ *   - Department    existente (por code) => se reutiliza, SIN writes.
+ *   - City          existente (por slug) => se reutiliza, SIN writes.
+ *
+ * El principio es "existing = preserve", NO una lista de campos: cualquier
+ * campo administrable —actual o futuro— queda intacto por construcción,
+ * porque no se emite ningún UPDATE sobre filas existentes. Eso cubre
+ * estimatedDaysMin/Max, shippingCompany, departureDaysOfWeek, sortOrder,
+ * isActive, capacity, cutOffTime, departureDate y los campos que agregue la
+ * Fase 5B sin tocar este archivo.
+ */
 export async function seedLogistics(prismaClient?: PrismaClient) {
   const db = prismaClient || prisma;
-  console.log("🚚 Iniciando seed de logística...");
+  console.log("🚚 Iniciando seed de logística (bootstrap no destructivo)...");
 
-  // Crear rutas de envío (upsert por nombre)
+  // Rutas de envío: se busca por nombre y SÓLO se crea si falta.
+  // ShippingRoute.name no tiene constraint UNIQUE, por lo que no admite
+  // upsert/ON CONFLICT (ver "RIESGO DE CARRERA" al final del archivo).
   const routeCache: Record<string, string> = {};
 
   for (const entry of shippingData) {
@@ -129,32 +153,28 @@ export async function seedLogistics(prismaClient?: PrismaClient) {
         where: { name: entry.route.name },
       });
 
-      const route = existingRoute
-        ? await db.shippingRoute.update({
-            where: { id: existingRoute.id },
-            data: {
-              estimatedDaysMin: entry.route.estimatedDaysMin,
-              estimatedDaysMax: entry.route.estimatedDaysMax,
-              shippingCompany: entry.route.shippingCompany,
-              departureDaysOfWeek: entry.route.departureDaysOfWeek || [1, 2, 3, 4, 5],
-              sortOrder: entry.route.sortOrder,
-              isActive: true,
-            },
-          })
-        : await db.shippingRoute.create({
-            data: {
-              name: entry.route.name,
-              estimatedDaysMin: entry.route.estimatedDaysMin,
-              estimatedDaysMax: entry.route.estimatedDaysMax,
-              shippingCompany: entry.route.shippingCompany,
-              departureDaysOfWeek: entry.route.departureDaysOfWeek || [1, 2, 3, 4, 5],
-              sortOrder: entry.route.sortOrder,
-              isActive: true,
-            },
-          });
+      if (existingRoute) {
+        // Ruta administrada desde /admin/envios: se reutiliza su id y no se
+        // toca NINGUNA configuración (ni isActive ni los días de salida).
+        routeCache[entry.route.name] = existingRoute.id;
+        console.log(`  = Ruta existente (sin cambios): ${existingRoute.name}`);
+        continue;
+      }
+
+      const route = await db.shippingRoute.create({
+        data: {
+          name: entry.route.name,
+          estimatedDaysMin: entry.route.estimatedDaysMin,
+          estimatedDaysMax: entry.route.estimatedDaysMax,
+          shippingCompany: entry.route.shippingCompany,
+          departureDaysOfWeek: entry.route.departureDaysOfWeek || [1, 2, 3, 4, 5],
+          sortOrder: entry.route.sortOrder,
+          isActive: true,
+        },
+      });
 
       routeCache[entry.route.name] = route.id;
-      console.log(`  ✓ Ruta: ${route.name}`);
+      console.log(`  ✓ Ruta creada: ${route.name}`);
     }
   }
 
@@ -162,11 +182,13 @@ export async function seedLogistics(prismaClient?: PrismaClient) {
   const deptCache: Record<string, string> = {};
 
   for (const entry of shippingData) {
-    // Upsert department
+    // `update: {}` es un no-op REAL: Prisma emite únicamente SELECTs sobre una
+    // fila existente, sin UPDATE y sin tocar `updatedAt` (verificado). Por eso
+    // se conservan name/isActive tal como los dejó el administrador.
     if (!deptCache[entry.department.code]) {
       const dept = await db.department.upsert({
         where: { code: entry.department.code },
-        update: { name: entry.department.name, isActive: true },
+        update: {},
         create: {
           name: entry.department.name,
           code: entry.department.code,
@@ -183,14 +205,14 @@ export async function seedLogistics(prismaClient?: PrismaClient) {
     // Crear ciudades
     for (const cityName of entry.cities) {
       const slug = slugify(cityName);
+      // `update: {}` => una ciudad existente conserva name, departmentId,
+      // shippingRouteId e isActive. El seed NUNCA mueve una ciudad de
+      // departamento, le cambia la ruta ni la reactiva: esa reasignación
+      // destructiva es la que la Fase 5A evitó en /admin/envios y que un
+      // redeploy podía reintroducir.
       await db.city.upsert({
         where: { slug },
-        update: {
-          name: cityName,
-          departmentId,
-          shippingRouteId: routeId,
-          isActive: true,
-        },
+        update: {},
         create: {
           name: cityName,
           slug,
@@ -205,6 +227,27 @@ export async function seedLogistics(prismaClient?: PrismaClient) {
 
   console.log("\n✅ Seed de logística completado");
 }
+
+/**
+ * RIESGO DE CARRERA (preexistente, documentado en Fase 5B0 — NO corregido aquí)
+ *
+ * `ShippingRoute.name` no tiene constraint UNIQUE en el schema ni en ninguna
+ * migración. Dos seeds concurrentes (p. ej. dos réplicas del contenedor
+ * arrancando a la vez) pueden ambos hacer `findFirst` → null y ambos hacer
+ * `create`, dejando DOS rutas con el mismo nombre. Este comportamiento es
+ * idéntico al que ya existía antes de 5B0 (mismo `findFirst` + `create`), por
+ * lo que no es una regresión de este cambio.
+ *
+ * No se corrige en 5B0 porque la única solución real es un índice
+ * `UNIQUE(name)` con su migración, y el alcance de esta fase excluye cambios
+ * de schema y migraciones. Mientras no exista ese índice no se puede usar
+ * `upsert`/`ON CONFLICT` para esta tabla.
+ *
+ * En `Department.code` y `City.slug` la unicidad SÍ está garantizada por la
+ * base, así que una carrera equivalente fallaría de forma ruidosa con P2002 en
+ * vez de duplicar datos (la carrera entre el SELECT y el INSERT del upsert es
+ * un comportamiento conocido de Prisma).
+ */
 
 if (import.meta.main) {
   seedLogistics()
