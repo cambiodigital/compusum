@@ -4,6 +4,14 @@ import { Prisma } from "@prisma/client";
 import { requireAdminUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { planCityUpsert } from "@/lib/city-route";
+import {
+  BUSINESS_TIMEZONE,
+  resolveDepartureAvailability,
+  validateRouteSchedule,
+  formatCivilDate,
+  toBusinessCivilDate,
+  type RouteScheduleInput,
+} from "@/lib/route-schedule";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,6 +21,10 @@ import { Badge } from "@/components/ui/badge";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Solo para MOSTRAR el `cutOffTime` legacy (solo lectura). El cutoff recurrente
+ * NO se parsea con `new Date(raw)`: se guarda como `HH:mm` textual.
+ */
 function toDateTimeLocal(date: Date | null): string {
   if (!date) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -26,6 +38,73 @@ function slugify(text: string): string {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
+}
+
+/** Extrae los días de salida marcados en el formulario. */
+function readDepartureDays(formData: FormData): number[] {
+  const days: number[] = [];
+  for (const [key, value] of formData.entries()) {
+    if (key.startsWith("departureDays-")) {
+      const dayNum = parseInt(key.replace("departureDays-", ""));
+      if (!isNaN(dayNum) && value === "on") days.push(dayNum);
+    }
+  }
+  return days;
+}
+
+/**
+ * Lee el cutoff RECURRENTE del formulario y lo valida con el MISMO validador
+ * que usa el runtime (`validateRouteSchedule`), para que la UI no pueda
+ * aceptar una configuración que el cálculo luego considere inválida.
+ * Ambos vacíos => sin cutoff. Uno solo relleno / fuera de rango => error.
+ */
+function parseRouteCutoff(
+  formData: FormData,
+  departureDaysOfWeek: number[]
+): { ok: true; cutoffDaysBefore: number | null; cutoffLocalTime: string | null } | { ok: false; error: string } {
+  const daysBeforeRaw = String(formData.get("cutoffDaysBefore") ?? "").trim();
+  const localTimeRaw = String(formData.get("cutoffLocalTime") ?? "").trim();
+
+  const validated = validateRouteSchedule({
+    departureDaysOfWeek,
+    cutoffDaysBefore: daysBeforeRaw === "" ? null : Number(daysBeforeRaw),
+    cutoffLocalTime: localTimeRaw === "" ? null : localTimeRaw,
+  });
+
+  if (!validated.ok) {
+    return { ok: false, error: `route-schedule-${validated.reason}` };
+  }
+
+  return {
+    ok: true,
+    cutoffDaysBefore: validated.cutoffDaysBefore,
+    cutoffLocalTime: validated.cutoffLocalTime,
+  };
+}
+
+/** 'YYYY-MM-DD' → 'DD/MM' para etiquetas de preview. */
+function civilDateDDMM(civilDate: string): string {
+  const [, month, day] = civilDate.split("-");
+  return `${day}/${month}`;
+}
+
+/** Preview server-side (nunca en el navegador: evitaría su timezone). */
+function schedulePreview(schedule: RouteScheduleInput) {
+  const availability = resolveDepartureAvailability(schedule, new Date());
+  if (availability.status === 'misconfigured') {
+    return { ok: false as const, reason: availability.reason };
+  }
+  const { next, cutoffAtUtc, skippedDeparture, skippedCivilDate } = availability;
+  return {
+    ok: true as const,
+    civilDate: next.civilDate,
+    dayName: next.dayName,
+    daysUntil: next.daysUntil,
+    cutoffCivilLabel: cutoffAtUtc ? formatCivilDate(toBusinessCivilDate(cutoffAtUtc)) : null,
+    cutoffTimeLabel: schedule.cutoffLocalTime ?? null,
+    skippedDeparture,
+    skippedCivilDate,
+  };
 }
 
 export default async function AdminEnviosPage({
@@ -69,6 +148,19 @@ export default async function AdminEnviosPage({
     }))
   );
 
+  // Preview por ruta usando EXACTAMENTE el helper central del runtime, en el
+  // servidor (el navegador aportaría su propio timezone).
+  const routePreviews = new Map(
+    routes.map((route) => [
+      route.id,
+      schedulePreview({
+        departureDaysOfWeek: route.departureDaysOfWeek,
+        cutoffDaysBefore: route.cutoffDaysBefore,
+        cutoffLocalTime: route.cutoffLocalTime,
+      }),
+    ])
+  );
+
   async function createRoute(formData: FormData) {
     "use server";
 
@@ -83,18 +175,9 @@ export default async function AdminEnviosPage({
     const shippingCompany = String(formData.get("shippingCompany") || "").trim() || null;
     const notes = String(formData.get("notes") || "").trim() || null;
     const sortOrder = Number(formData.get("sortOrder") || 0);
-    const cutOffTimeRaw = String(formData.get("cutOffTime") || "").trim();
 
     // Extract selected departure days from checkboxes: departureDays-0, departureDays-1, etc.
-    const departureDaysOfWeek: number[] = [];
-    for (const [key, value] of formData.entries()) {
-      if (key.startsWith("departureDays-")) {
-        const dayNum = parseInt(key.replace("departureDays-", ""));
-        if (!isNaN(dayNum) && value === "on") {
-          departureDaysOfWeek.push(dayNum);
-        }
-      }
-    }
+    const departureDaysOfWeek = readDepartureDays(formData);
 
     if (!name || estimatedDaysMin < 0 || estimatedDaysMax < 0 || estimatedDaysMax < estimatedDaysMin) {
       redirect("/admin/envios?error=route-invalid");
@@ -102,6 +185,11 @@ export default async function AdminEnviosPage({
 
     if (departureDaysOfWeek.length === 0) {
       redirect("/admin/envios?error=route-no-days");
+    }
+
+    const cutoff = parseRouteCutoff(formData, departureDaysOfWeek);
+    if (!cutoff.ok) {
+      redirect(`/admin/envios?error=${cutoff.error}`);
     }
 
     await db.shippingRoute.create({
@@ -112,8 +200,9 @@ export default async function AdminEnviosPage({
         shippingCompany,
         notes,
         sortOrder,
-        cutOffTime: cutOffTimeRaw ? new Date(cutOffTimeRaw) : null,
         departureDaysOfWeek,
+        cutoffDaysBefore: cutoff.cutoffDaysBefore,
+        cutoffLocalTime: cutoff.cutoffLocalTime,
       },
     });
 
@@ -136,19 +225,10 @@ export default async function AdminEnviosPage({
     const shippingCompany = String(formData.get("shippingCompany") || "").trim() || null;
     const notes = String(formData.get("notes") || "").trim() || null;
     const sortOrder = Number(formData.get("sortOrder") || 0);
-    const cutOffTimeRaw = String(formData.get("cutOffTime") || "").trim();
     const isActive = formData.get("isActive") === "on";
 
     // Extract selected departure days from checkboxes
-    const departureDaysOfWeek: number[] = [];
-    for (const [key, value] of formData.entries()) {
-      if (key.startsWith("departureDays-")) {
-        const dayNum = parseInt(key.replace("departureDays-", ""));
-        if (!isNaN(dayNum) && value === "on") {
-          departureDaysOfWeek.push(dayNum);
-        }
-      }
-    }
+    const departureDaysOfWeek = readDepartureDays(formData);
 
     if (!id || estimatedDaysMin < 0 || estimatedDaysMax < 0 || estimatedDaysMax < estimatedDaysMin) {
       redirect("/admin/envios?error=route-update-invalid");
@@ -156,6 +236,11 @@ export default async function AdminEnviosPage({
 
     if (departureDaysOfWeek.length === 0) {
       redirect("/admin/envios?error=route-no-days");
+    }
+
+    const cutoff = parseRouteCutoff(formData, departureDaysOfWeek);
+    if (!cutoff.ok) {
+      redirect(`/admin/envios?error=${cutoff.error}`);
     }
 
     await db.shippingRoute.update({
@@ -167,8 +252,9 @@ export default async function AdminEnviosPage({
         notes,
         sortOrder,
         isActive,
-        cutOffTime: cutOffTimeRaw ? new Date(cutOffTimeRaw) : null,
         departureDaysOfWeek,
+        cutoffDaysBefore: cutoff.cutoffDaysBefore,
+        cutoffLocalTime: cutoff.cutoffLocalTime,
       },
     });
 
@@ -342,6 +428,8 @@ export default async function AdminEnviosPage({
         notes: source.notes,
         sortOrder: source.sortOrder,
         cutOffTime: source.cutOffTime,
+        cutoffDaysBefore: source.cutoffDaysBefore,
+        cutoffLocalTime: source.cutoffLocalTime,
         departureDaysOfWeek: source.departureDaysOfWeek,
         isActive: false,
       },
@@ -400,6 +488,14 @@ export default async function AdminEnviosPage({
               ? "No se puede eliminar la ciudad porque tiene carritos o pedidos asociados."
               : params.error === "city-slug-conflict"
               ? "Ya existe una ciudad con ese nombre en OTRO departamento. No se movió ni modificó la ciudad existente: usa otro nombre o gestiona la ciudad desde su departamento actual."
+              : params.error === "route-schedule-partial_cutoff"
+              ? "Corte incompleto: completa los DÍAS antes y la HORA, o deja ambos vacíos para una ruta sin corte."
+              : params.error === "route-schedule-invalid_cutoff_days"
+              ? "Días antes del corte inválido: debe ser un entero entre 0 y 6."
+              : params.error === "route-schedule-invalid_cutoff_time"
+              ? "Hora del corte inválida: usa el formato HH:mm entre 00:00 y 23:59."
+              : params.error === "route-schedule-empty_days" || params.error === "route-schedule-invalid_days"
+              ? "Días de salida inválidos: selecciona al menos un día (0=domingo a 6=sábado)."
               : "Hubo un error validando los datos. Revisa los campos e intenta de nuevo."}
           </div>
         )}
@@ -454,10 +550,27 @@ export default async function AdminEnviosPage({
                     )}
                   </div>
                 </div>
-                <div>
-                  <Label htmlFor="route-cutoff">Hora de corte</Label>
-                  <Input id="route-cutoff" name="cutOffTime" type="datetime-local" />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label htmlFor="route-cutoff-days">Corte: días antes</Label>
+                    <Input
+                      id="route-cutoff-days"
+                      name="cutoffDaysBefore"
+                      type="number"
+                      min={0}
+                      max={6}
+                      placeholder="Sin corte"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="route-cutoff-time">Corte: hora</Label>
+                    <Input id="route-cutoff-time" name="cutoffLocalTime" type="time" step={60} />
+                  </div>
                 </div>
+                <p className="text-xs text-slate-500">
+                  Ambos vacíos = ruta sin corte. Ejemplo: 3 días antes a las 14:00 cierra el
+                  viernes anterior a las 14:00 ({BUSINESS_TIMEZONE}).
+                </p>
                 <div>
                   <Label htmlFor="route-notes">Notas</Label>
                   <Input id="route-notes" name="notes" placeholder="Observaciones" />
@@ -579,11 +692,24 @@ export default async function AdminEnviosPage({
                     </div>
 
                     <div>
-                      <Label>Corte de pedidos</Label>
+                      <Label>Corte: días antes</Label>
                       <Input
-                        name="cutOffTime"
-                        type="datetime-local"
-                        defaultValue={toDateTimeLocal(route.cutOffTime)}
+                        name="cutoffDaysBefore"
+                        type="number"
+                        min={0}
+                        max={6}
+                        placeholder="Sin corte"
+                        defaultValue={route.cutoffDaysBefore ?? ""}
+                      />
+                    </div>
+
+                    <div>
+                      <Label>Corte: hora</Label>
+                      <Input
+                        name="cutoffLocalTime"
+                        type="time"
+                        step={60}
+                        defaultValue={route.cutoffLocalTime ?? ""}
                       />
                     </div>
 
@@ -609,6 +735,45 @@ export default async function AdminEnviosPage({
                       ))}
                     </div>
                   </div>
+
+                  {(() => {
+                    const preview = routePreviews.get(route.id);
+                    if (!preview || !preview.ok) {
+                      return (
+                        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                          Programación inválida ({preview ? preview.reason : "desconocida"}): la ruta
+                          no se asignará hasta corregirla.
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 space-y-0.5">
+                        <p>
+                          Próxima salida:{" "}
+                          <span className="font-medium">
+                            {preview.dayName} {civilDateDDMM(preview.civilDate)}
+                          </span>
+                          {preview.daysUntil === 0 ? " (hoy)" : ` — en ${preview.daysUntil} día${preview.daysUntil === 1 ? "" : "s"}`}
+                        </p>
+                        <p>
+                          {preview.cutoffCivilLabel
+                            ? `Corte: ${civilDateDDMM(preview.cutoffCivilLabel)} a las ${preview.cutoffTimeLabel} — ${BUSINESS_TIMEZONE}`
+                            : "Corte: sin corte recurrente — la ruta sale según sus días configurados."}
+                        </p>
+                        {preview.skippedDeparture && preview.skippedCivilDate && (
+                          <p className="text-amber-700">
+                            La salida del {civilDateDDMM(preview.skippedCivilDate)} ya cerró su corte:
+                            el pedido viaja en la próxima salida.
+                          </p>
+                        )}
+                        {route.cutOffTime && (
+                          <p className="text-slate-500">
+                            Corte heredado (ya no utilizado): {toDateTimeLocal(route.cutOffTime)}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
                     <div>

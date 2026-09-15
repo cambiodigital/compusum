@@ -310,9 +310,14 @@ model ShippingRoute {
   notes                 String?
   isActive              Boolean   @default(true)
   capacity              Int?
-  cutOffTime            DateTime?
+  cutOffTime            DateTime? // Legacy absoluto: YA NO decide disponibilidad (Fase 5B1). Se conserva intacto.
   departureDate         DateTime? // Legacy: use departureDaysOfWeek instead
   departureDaysOfWeek   Int[]     @default([1]) // 0=Sun, 1=Mon, 2=Tue...6=Sat
+  /// Corte RECURRENTE (Fase 5B1): días civiles antes de cada salida. null = sin cutoff.
+  /// Contrato: ambos null, o ambos con valor. Calculado en America/Bogota.
+  cutoffDaysBefore      Int?
+  /// Hora local del corte en formato "HH:mm" (00:00–23:59), en America/Bogota. null = sin cutoff.
+  cutoffLocalTime       String?
   sortOrder             Int       @default(0)
   cities                City[]
   orders                Order[]
