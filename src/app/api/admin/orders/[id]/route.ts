@@ -7,6 +7,7 @@ import {
   parseCityIdMutation,
   resolveShippingRouteForCity,
   CityResolutionError,
+  type CityIdMutation,
 } from "@/lib/city-route";
 
 interface RouteParams {
@@ -107,22 +108,15 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (customerPhone !== undefined) updateData.customerPhone = customerPhone;
     if (customerCompany !== undefined) updateData.customerCompany = customerCompany;
 
-    // Fase 5A — ciudad/ruta en tándem con la fuente única
-    // (resolveShippingRouteForCity): omitido conserva, null limpia ambos,
-    // ciudad válida fija cityId + ruta server-side de esa ciudad; inválida o
-    // inactiva => 400 controlado (nunca P2003 => 500). RBAC intacto: AGENT
-    // sigue limitado a SUS pedidos (re-check bajo lock más abajo).
+    // Fase 5A-fix (P1): cityId se CLASIFICA aquí (tipo inválido => 400 con
+    // cero writes) pero se RESUELVE DENTRO de la transacción autoritativa de
+    // abajo, tras el FOR UPDATE y el re-chequeo de ownership AGENT post-lock.
+    // `routeId` sigue sin aceptarse del body: la ruta SIEMPRE se deriva
+    // server-side de la ciudad validada, en la misma tx, en tándem.
+    let cityMutation: CityIdMutation | null = null;
     if (cityId !== undefined) {
       try {
-        const cityMutation = parseCityIdMutation(cityId);
-        if (cityMutation.action === "clear") {
-          updateData.cityId = null;
-          updateData.routeId = null;
-        } else if (cityMutation.action === "set") {
-          const resolved = await resolveShippingRouteForCity(cityMutation.cityId);
-          updateData.cityId = resolved.city.id;
-          updateData.routeId = resolved.route?.id ?? null;
-        }
+        cityMutation = parseCityIdMutation(cityId);
       } catch (error) {
         if (error instanceof CityResolutionError) {
           return NextResponse.json({ success: false, error: error.message }, { status: 400 });
@@ -130,6 +124,36 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         throw error;
       }
     }
+
+    /**
+     * Resuelve cityId/routeId EN TÁNDEM contra la tx autoritativa:
+     *   - omit  => sin cambios;
+     *   - clear => ambos null;
+     *   - set   => ciudad activa validada + ruta server-side (cutoff actual).
+     * CityResolutionError aborta la tx con 400 listo para responder.
+     */
+    const applyCityMutationInTx = async (
+      tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]
+    ) => {
+      if (!cityMutation) return;
+      try {
+        if (cityMutation.action === "clear") {
+          updateData.cityId = null;
+          updateData.routeId = null;
+        } else if (cityMutation.action === "set") {
+          const resolved = await resolveShippingRouteForCity(cityMutation.cityId, tx);
+          updateData.cityId = resolved.city.id;
+          updateData.routeId = resolved.route?.id ?? null;
+        }
+      } catch (error) {
+        if (error instanceof CityResolutionError) {
+          throw new OrderPatchAbort(
+            NextResponse.json({ success: false, error: error.message }, { status: 400 })
+          );
+        }
+        throw error;
+      }
+    };
 
     // Legacy `items` replacement: the payload is only PREPARED here. The
     // actual writes run inside the transaction below, so a status change that
@@ -204,6 +228,10 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
           }
           const postLockStatus = locked[0].status;
 
+          // Fase 5A-fix (P1): City→Route POST-lock y DENTRO de la tx —
+          // inválida/inactiva => 400, cero writes.
+          await applyCityMutationInTx(tx);
+
           // Redundant by construction (validated before the transaction), but
           // the target is re-checked against the authoritative state.
           if (!isValidOrderStatus(status)) {
@@ -272,18 +300,61 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         throw txError;
       }
     } else {
-      // No status change: the line replacement is still atomic on its own.
-      updated = await db.$transaction(async (tx) => {
-        if (itemRows) {
-          await tx.orderItem.deleteMany({ where: { orderId: id } });
-          await tx.orderItem.createMany({ data: itemRows });
-        }
-        return tx.order.update({
-          where: { id },
-          data: updateData,
-          include: { items: true },
+      // Fase 5A-fix (P1): sin cambio de estado la mutación TAMBIÉN es
+      // autoritativa — antes actualizaba sin lock ni re-chequeo, y un AGENT
+      // que pasó el lookup inicial podía mutar un pedido reasignado a OTRO
+      // asesor mientras esperaba. Ahora: FOR UPDATE + ownership post-lock
+      // (404 fail-closed, sin leak de existencia), City→Route resuelta
+      // DENTRO de la tx, y un único write atómico. Cualquier error =>
+      // cero writes.
+      try {
+        updated = await db.$transaction(async (tx) => {
+          const locked = await tx.$queryRaw<
+            { id: string; status: string; requestType: string; agentId: string | null }[]
+          >`
+            SELECT id, status, "requestType", "agentId" FROM "Order" WHERE id = ${id} FOR UPDATE`;
+
+          // Deleted between the initial read and the lock.
+          if (!locked || locked.length === 0) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                { success: false, error: "Pedido no encontrado" },
+                { status: 404 }
+              )
+            );
+          }
+
+          // Ownership AGENT re-checked on the LOCKED row (fail-closed 404).
+          if (isAgentRole(user!.role) && locked[0].agentId !== user!.id) {
+            throw new OrderPatchAbort(
+              NextResponse.json(
+                { success: false, error: "Pedido no encontrado" },
+                { status: 404 }
+              )
+            );
+          }
+
+          await applyCityMutationInTx(tx);
+
+          // Legacy line replacement inside the same tx: rolls back together
+          // with any city/ownership rejection above.
+          if (itemRows) {
+            await tx.orderItem.deleteMany({ where: { orderId: id } });
+            await tx.orderItem.createMany({ data: itemRows });
+          }
+
+          return tx.order.update({
+            where: { id },
+            data: updateData,
+            include: { items: true },
+          });
         });
-      });
+      } catch (txError) {
+        if (txError instanceof OrderPatchAbort) {
+          return txError.response;
+        }
+        throw txError;
+      }
     }
 
     return NextResponse.json({

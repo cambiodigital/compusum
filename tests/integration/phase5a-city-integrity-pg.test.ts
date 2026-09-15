@@ -599,6 +599,67 @@ describe('FASE 5A Order — editCustomerOrder ciudad/ruta en tándem', () => {
       expect(after?.items[0].quantity).toBe(2);
     }
   });
+
+  d('edit con cityId TIPO INVÁLIDO (number) => 400 y CERO writes (NO se trata como omitido)', async () => {
+    const orderId = await seedHistoricalOrder({ suffix: 'e5', cityId: cityA, routeId: routeAId });
+    const before = await db.order.findUnique({ where: { id: orderId }, include: { items: true } });
+    const historyBefore = await db.orderStatusHistory.count({ where: { orderId } });
+    const viewer = { user: { id: customerId, role: 'CUSTOMER' }, sessionId: null };
+
+    let error: unknown = null;
+    try {
+      await editCustomerOrder({
+        orderId,
+        viewer,
+        sessionUser: { id: customerId, role: 'CUSTOMER' },
+        sessionId: null,
+        // P1-fix: `text()` convertía 123 en undefined => "omitido" (conservaba
+        // ciudad y ESCRIBÍA notes). El contrato 5A exige 400 y cero writes.
+        body: { cityId: 123, notes: 'no debe escribirse', items: [{ productId, quantity: 7 }] } as any,
+      });
+    } catch (e) {
+      error = e;
+    }
+
+    expect(error).toBeInstanceOf(OrderEditError);
+    expect((error as OrderEditError).status).toBe(400);
+
+    const after = await db.order.findUnique({ where: { id: orderId }, include: { items: true } });
+    expect(after?.cityId).toBe(cityA);       // cityId intacto
+    expect(after?.routeId).toBe(routeAId);   // routeId intacto
+    expect(after?.notes).toBe(before?.notes); // notes intactas (null)
+    expect(after?.subtotal).toBe(before?.subtotal);
+    expect(after?.items).toHaveLength(1);    // items intactos
+    expect(after?.items[0].quantity).toBe(2);
+    expect(after?.updatedAt).toEqual(before?.updatedAt); // sin write del pedido
+
+    // Cero historial nuevo (la edición fallida no audita).
+    const historyAfter = await db.orderStatusHistory.count({ where: { orderId } });
+    expect(historyAfter).toBe(historyBefore);
+  });
+
+  d('edit con cityId TIPO INVÁLIDO (objeto) => 400 y cero writes', async () => {
+    const orderId = await seedHistoricalOrder({ suffix: 'e6', cityId: cityA, routeId: routeAId });
+    const viewer = { user: { id: customerId, role: 'CUSTOMER' }, sessionId: null };
+    let error: unknown = null;
+    try {
+      await editCustomerOrder({
+        orderId,
+        viewer,
+        sessionUser: { id: customerId, role: 'CUSTOMER' },
+        sessionId: null,
+        body: { cityId: { id: cityB }, notes: 'x' } as any,
+      });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(OrderEditError);
+    expect((error as OrderEditError).status).toBe(400);
+    const after = await db.order.findUnique({ where: { id: orderId } });
+    expect(after?.cityId).toBe(cityA);
+    expect(after?.routeId).toBe(routeAId);
+    expect(after?.notes).toBeNull();
+  });
 });
 
 // =====================
