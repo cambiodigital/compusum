@@ -1,6 +1,6 @@
 import { db } from './db';
 import { hashPassword } from './auth';
-import { getNextRouteDeparture } from './route-schedule';
+import { resolveShippingRouteForCity } from './city-route';
 import { canonicalColombiaPhone, phoneOrVariants } from './phone';
 import {
   transferSessionCartToUserTx,
@@ -191,48 +191,22 @@ export async function resolveOrderCustomer(
   return upsertCheckoutCustomer(input, tx);
 }
 
+/**
+ * Ruta de envío para una ciudad — delega en la FUENTE ÚNICA
+ * resolveShippingRouteForCity (src/lib/city-route.ts): relación
+ * server-side de la ciudad, ruta inactiva/corte cerrado => null.
+ * Se conserva la firma histórica (y null en ciudad inválida) para los
+ * llamadores existentes; el flujo de checkout usa el helper directo
+ * para obtener el error 400 controlado.
+ */
 export async function findBestRouteForCity(cityId?: string | null, now = new Date(), tx: any = db) {
   if (!cityId) return null;
-
-  const routes = await tx.shippingRoute.findMany({
-    where: {
-      cities: { some: { id: cityId } },
-      isActive: true,
-    },
-    orderBy: { sortOrder: 'asc' },
-  });
-
-  if (!routes || !routes.length) return null;
-
-  const openRoutes = routes.filter((route: any) => {
-    if (route.cutOffTime && new Date(route.cutOffTime) <= now) {
-      return false;
-    }
-    return true;
-  });
-
-  if (!openRoutes.length) return null;
-
-  const routesWithNextDeparture = openRoutes.map((route: any) => {
-    let nextDeparture: Date | null = null;
-    if (route.departureDaysOfWeek && Array.isArray(route.departureDaysOfWeek) && route.departureDaysOfWeek.length > 0) {
-      nextDeparture = getNextRouteDeparture(now, route.departureDaysOfWeek).nextDepartureDate;
-    } else if (route.departureDate) {
-      nextDeparture = new Date(route.departureDate);
-    } else {
-      nextDeparture = getNextRouteDeparture(now, [1]).nextDepartureDate;
-    }
-    return { route, nextDeparture };
-  });
-
-  routesWithNextDeparture.sort((a: any, b: any) => {
-    const timeA = a.nextDeparture ? a.nextDeparture.getTime() : Infinity;
-    const timeB = b.nextDeparture ? b.nextDeparture.getTime() : Infinity;
-    if (timeA !== timeB) return timeA - timeB;
-    return (a.route.sortOrder || 0) - (b.route.sortOrder || 0);
-  });
-
-  return routesWithNextDeparture[0]?.route || null;
+  try {
+    const { route } = await resolveShippingRouteForCity(cityId, tx, now);
+    return route;
+  } catch {
+    return null;
+  }
 }
 
 /**

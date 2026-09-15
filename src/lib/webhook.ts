@@ -56,6 +56,12 @@ export interface OrderWebhookPayload {
 /**
  * Build a complete webhook payload from an order ID.
  * Fetches all related data (items, city, shipping route, assigned agent).
+ *
+ * Fase 5A — la ruta comunicada es el SNAPSHOT del pedido (Order.routeId →
+ * Order.route): reasignar la ruta de una ciudad NUNCA reinterpreta pedidos
+ * históricos. Fallback DOCUMENTADO solo para legacy (pedidos creados antes
+ * de routeId, o con ruta null): city.shippingRoute. Una sola query con las
+ * dos relaciones incluidas (sin N+1).
  */
 export async function buildWebhookPayload(orderId: string): Promise<OrderWebhookPayload | null> {
   const order = await db.order.findUnique({
@@ -63,6 +69,7 @@ export async function buildWebhookPayload(orderId: string): Promise<OrderWebhook
     include: {
       items: true,
       agent: { select: { name: true } },
+      route: true,
       city: {
         include: {
           department: true,
@@ -73,6 +80,9 @@ export async function buildWebhookPayload(orderId: string): Promise<OrderWebhook
   });
 
   if (!order) return null;
+
+  // Snapshot primero; legacy fallback solo si el pedido no tiene routeId.
+  const shippingRoute = order.route ?? order.city?.shippingRoute ?? null;
 
   return {
     orderNumber: order.orderNumber,
@@ -103,11 +113,11 @@ export async function buildWebhookPayload(orderId: string): Promise<OrderWebhook
       ? {
           name: order.city.name,
           department: order.city.department.name,
-          shippingRoute: order.city.shippingRoute?.name || null,
-          estimatedDays: order.city.shippingRoute
-            ? `${order.city.shippingRoute.estimatedDaysMin}-${order.city.shippingRoute.estimatedDaysMax} días`
+          shippingRoute: shippingRoute?.name || null,
+          estimatedDays: shippingRoute
+            ? `${shippingRoute.estimatedDaysMin}-${shippingRoute.estimatedDaysMax} días`
             : null,
-          shippingCompany: order.city.shippingRoute?.shippingCompany || null,
+          shippingCompany: shippingRoute?.shippingCompany || null,
         }
       : null,
   };

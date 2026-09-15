@@ -1,7 +1,9 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { Prisma } from "@prisma/client";
 import { requireAdminUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { planCityUpsert } from "@/lib/city-route";
 import { Header } from "@/components/admin/header";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -220,22 +222,37 @@ export default async function AdminEnviosPage({
 
     const slug = slugify(name);
 
-    await db.city.upsert({
-      where: { slug },
-      update: {
-        name,
-        departmentId,
-        shippingRouteId,
-        isActive: true,
-      },
-      create: {
-        name,
-        slug,
-        departmentId,
-        shippingRouteId,
-        isActive: true,
-      },
-    });
+    // Fase 5A: alta NO destructiva (planCityUpsert). Si el slug ya existe en
+    // OTRO departamento (municipio homónimo), se responde con conflicto
+    // explícito en vez de MOVER la ciudad existente perdiendo su ruta.
+    const plan = await planCityUpsert({ slug, name, departmentId, shippingRouteId });
+    try {
+      if (plan.action === "conflict") {
+        redirect("/admin/envios?error=city-slug-conflict");
+      } else if (plan.action === "update") {
+        await db.city.update({
+          where: { id: plan.cityId },
+          data: { name, departmentId, shippingRouteId, isActive: true },
+        });
+      } else {
+        await db.city.create({
+          data: {
+            name: plan.name,
+            slug: plan.slug,
+            departmentId: plan.departmentId,
+            shippingRouteId: plan.shippingRouteId,
+            isActive: true,
+          },
+        });
+      }
+    } catch (error) {
+      // Carrera admin-vs-admin sobre el mismo slug: mismo trato que el
+      // conflicto (sin upsert silencioso ni fila movida).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        redirect("/admin/envios?error=city-slug-conflict");
+      }
+      throw error;
+    }
 
     revalidatePath("/admin/envios");
     revalidatePath("/api/shipping/cities");
@@ -381,6 +398,8 @@ export default async function AdminEnviosPage({
               ? "No se puede eliminar la ruta porque tiene pedidos asociados."
               : params.error === "city-has-references"
               ? "No se puede eliminar la ciudad porque tiene carritos o pedidos asociados."
+              : params.error === "city-slug-conflict"
+              ? "Ya existe una ciudad con ese nombre en OTRO departamento. No se movió ni modificó la ciudad existente: usa otro nombre o gestiona la ciudad desde su departamento actual."
               : "Hubo un error validando los datos. Revisa los campos e intenta de nuevo."}
           </div>
         )}
@@ -524,108 +543,116 @@ export default async function AdminEnviosPage({
             )}
 
             {routes.map((route) => (
-              <form key={route.id} action={updateRoute} className="border border-slate-200 rounded-lg p-4 space-y-3">
-                <input type="hidden" name="id" value={route.id} />
+              // Fase 5A: formularios HERMANOS (actualizar / duplicar / eliminar).
+              // Antes duplicar+eliminar estaban anidados dentro del form de
+              // actualización (HTML inválido: los submits caían al form externo).
+              <div key={route.id} className="border border-slate-200 rounded-lg p-4 space-y-3">
+                <form action={updateRoute} className="space-y-3">
+                  <input type="hidden" name="id" value={route.id} />
 
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                  <div>
-                    <Label>Ruta</Label>
-                    <div className="h-10 px-3 rounded-md border border-slate-200 bg-slate-50 flex items-center text-sm font-medium">
-                      {route.name}
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div>
+                      <Label>Ruta</Label>
+                      <div className="h-10 px-3 rounded-md border border-slate-200 bg-slate-50 flex items-center text-sm font-medium">
+                        {route.name}
+                      </div>
                     </div>
-                  </div>
 
-                  <div>
-                    <Label>Estimación (min-max días)</Label>
-                    <div className="grid grid-cols-2 gap-1">
-                      <Input
-                        name="estimatedDaysMin"
-                        type="number"
-                        min={0}
-                        defaultValue={route.estimatedDaysMin}
-                        required
-                      />
-                      <Input
-                        name="estimatedDaysMax"
-                        type="number"
-                        min={0}
-                        defaultValue={route.estimatedDaysMax}
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <Label>Corte de pedidos</Label>
-                    <Input
-                      name="cutOffTime"
-                      type="datetime-local"
-                      defaultValue={toDateTimeLocal(route.cutOffTime)}
-                    />
-                  </div>
-
-                  <div>
-                    <Label>Transportadora</Label>
-                    <Input name="shippingCompany" defaultValue={route.shippingCompany || ""} />
-                  </div>
-                </div>
-
-                <div>
-                  <Label className="font-medium mb-3 block">Días de salida</Label>
-                  <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
-                    {["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"].map((day, idx) => (
-                      <label key={idx} className="flex items-center gap-2 rounded border border-slate-200 p-2 hover:bg-slate-50 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          name={`departureDays-${idx}`}
-                          defaultChecked={(route.departureDaysOfWeek || []).includes(idx)}
-                          className="rounded"
+                    <div>
+                      <Label>Estimación (min-max días)</Label>
+                      <div className="grid grid-cols-2 gap-1">
+                        <Input
+                          name="estimatedDaysMin"
+                          type="number"
+                          min={0}
+                          defaultValue={route.estimatedDaysMin}
+                          required
                         />
-                        <span className="text-sm font-medium">{day}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
+                        <Input
+                          name="estimatedDaysMax"
+                          type="number"
+                          min={0}
+                          defaultValue={route.estimatedDaysMax}
+                          required
+                        />
+                      </div>
+                    </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+                    <div>
+                      <Label>Corte de pedidos</Label>
+                      <Input
+                        name="cutOffTime"
+                        type="datetime-local"
+                        defaultValue={toDateTimeLocal(route.cutOffTime)}
+                      />
+                    </div>
+
+                    <div>
+                      <Label>Transportadora</Label>
+                      <Input name="shippingCompany" defaultValue={route.shippingCompany || ""} />
+                    </div>
+                  </div>
+
                   <div>
-                    <Label htmlFor={`notes-${route.id}`}>Notas</Label>
-                    <Input
-                      id={`notes-${route.id}`}
-                      name="notes"
-                      defaultValue={route.notes || ""}
-                      placeholder="Observaciones internas"
-                    />
+                    <Label className="font-medium mb-3 block">Días de salida</Label>
+                    <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
+                      {["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"].map((day, idx) => (
+                        <label key={idx} className="flex items-center gap-2 rounded border border-slate-200 p-2 hover:bg-slate-50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            name={`departureDays-${idx}`}
+                            defaultChecked={(route.departureDaysOfWeek || []).includes(idx)}
+                            className="rounded"
+                          />
+                          <span className="text-sm font-medium">{day}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
 
-                  <div className="flex items-end gap-2 pt-2">
-                    <label className="text-sm flex items-center gap-2">
-                      <input type="checkbox" name="isActive" defaultChecked={route.isActive} />
-                      <span>Activa</span>
-                    </label>
-                    <Label>Orden</Label>
-                    <Input name="sortOrder" type="number" min={0} defaultValue={route.sortOrder} className="w-20" />
-                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+                    <div>
+                      <Label htmlFor={`notes-${route.id}`}>Notas</Label>
+                      <Input
+                        id={`notes-${route.id}`}
+                        name="notes"
+                        defaultValue={route.notes || ""}
+                        placeholder="Observaciones internas"
+                      />
+                    </div>
 
-                  <div className="flex items-end gap-2">
-                    <Button type="submit" className="w-full md:w-auto">
-                      Actualizar ruta
+                    <div className="flex items-end gap-2 pt-2">
+                      <label className="text-sm flex items-center gap-2">
+                        <input type="checkbox" name="isActive" defaultChecked={route.isActive} />
+                        <span>Activa</span>
+                      </label>
+                      <Label>Orden</Label>
+                      <Input name="sortOrder" type="number" min={0} defaultValue={route.sortOrder} className="w-20" />
+                    </div>
+
+                    <div className="flex items-end gap-2">
+                      <Button type="submit" className="w-full md:w-auto">
+                        Actualizar ruta
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+
+                <div className="flex items-end gap-2 justify-end">
+                  <form action={duplicateRoute}>
+                    <input type="hidden" name="id" value={route.id} />
+                    <Button type="submit" variant="outline" size="sm" title="Duplicar ruta">
+                      Duplicar
                     </Button>
-                    <form action={duplicateRoute}>
-                      <input type="hidden" name="id" value={route.id} />
-                      <Button type="submit" variant="outline" size="sm" title="Duplicar ruta">
-                        Duplicar
-                      </Button>
-                    </form>
-                    <form action={deleteRoute}>
-                      <input type="hidden" name="id" value={route.id} />
-                      <Button type="submit" variant="destructive" size="sm" title="Eliminar ruta">
-                        Eliminar
-                      </Button>
-                    </form>
-                  </div>
+                  </form>
+                  <form action={deleteRoute}>
+                    <input type="hidden" name="id" value={route.id} />
+                    <Button type="submit" variant="destructive" size="sm" title="Eliminar ruta">
+                      Eliminar
+                    </Button>
+                  </form>
                 </div>
-              </form>
+              </div>
             ))}
           </CardContent>
         </Card>
@@ -643,51 +670,54 @@ export default async function AdminEnviosPage({
             )}
 
             {cities.map((city) => (
-              <form key={city.id} action={updateCity} className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end border border-slate-200 rounded-lg p-3">
-                <input type="hidden" name="id" value={city.id} />
+              // Fase 5A: formularios HERMANOS (guardar / eliminar). El form de
+              // actualización usa display:contents para conservar EXACTAMENTE
+              // el mismo grid de 5 columnas de antes, sin anidamiento HTML.
+              <div key={city.id} className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end border border-slate-200 rounded-lg p-3">
+                <form action={updateCity} className="contents">
+                  <input type="hidden" name="id" value={city.id} />
 
-                <div className="md:col-span-2">
-                  <Label>Ciudad</Label>
-                  <div className="h-10 px-3 rounded-md border border-slate-200 bg-slate-50 flex items-center justify-between text-sm gap-2">
-                    <span>{city.name} ({city.departmentName})</span>
-                    {!city.isActive && <Badge variant="outline">Inactiva</Badge>}
+                  <div className="md:col-span-2">
+                    <Label>Ciudad</Label>
+                    <div className="h-10 px-3 rounded-md border border-slate-200 bg-slate-50 flex items-center justify-between text-sm gap-2">
+                      <span>{city.name} ({city.departmentName})</span>
+                      {!city.isActive && <Badge variant="outline">Inactiva</Badge>}
+                    </div>
                   </div>
-                </div>
 
-                <div>
-                  <Label>Ruta asignada</Label>
-                  <select
-                    name="shippingRouteId"
-                    defaultValue={city.shippingRouteId || ""}
-                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm"
-                  >
-                    <option value="">Sin ruta</option>
-                    {routes.map((route) => (
-                      <option key={route.id} value={route.id}>
-                        {route.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                  <div>
+                    <Label>Ruta asignada</Label>
+                    <select
+                      name="shippingRouteId"
+                      defaultValue={city.shippingRouteId || ""}
+                      className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm"
+                    >
+                      <option value="">Sin ruta</option>
+                      {routes.map((route) => (
+                        <option key={route.id} value={route.id}>
+                          {route.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                <div className="flex items-center gap-2">
-                  <input type="checkbox" name="isActive" defaultChecked={city.isActive} />
-                  <span className="text-sm">Activa</span>
-                </div>
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" name="isActive" defaultChecked={city.isActive} />
+                    <span className="text-sm">Activa</span>
+                  </div>
 
-                <div className="flex gap-2">
-                  <Button type="submit" className="flex-1">Guardar</Button>
-                </div>
+                  <div className="flex gap-2">
+                    <Button type="submit" className="flex-1">Guardar</Button>
+                  </div>
+                </form>
 
-                <div>
-                  <form action={deleteCity}>
-                    <input type="hidden" name="id" value={city.id} />
-                    <Button type="submit" variant="destructive" size="sm" className="w-full" title="Eliminar ciudad">
-                      Eliminar
-                    </Button>
-                  </form>
-                </div>
-              </form>
+                <form action={deleteCity}>
+                  <input type="hidden" name="id" value={city.id} />
+                  <Button type="submit" variant="destructive" size="sm" className="w-full" title="Eliminar ciudad">
+                    Eliminar
+                  </Button>
+                </form>
+              </div>
             ))}
           </CardContent>
         </Card>

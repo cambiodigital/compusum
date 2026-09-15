@@ -1,12 +1,15 @@
 import { db } from "./db";
 import { Prisma } from "@prisma/client";
 import {
-  findBestRouteForCity,
   normalizeEmail,
   normalizePhone,
   resolveOrderCustomer,
   type SessionUserRef,
 } from "./checkout";
+import {
+  resolveShippingRouteForCity,
+  CityResolutionError,
+} from "./city-route";
 import { getCurrentUser } from "./auth";
 import { validateAndPriceItems, CartValidationError } from "./cart-validation";
 import { resolveServerPricingCustomer } from "./pricing";
@@ -39,7 +42,8 @@ export type OrderCreateErrorCode =
   | "CART_INACTIVE"
   | "CART_EMPTY"
   | "ITEMS_INVALID"
-  | "CONTACT_INVALID";
+  | "CONTACT_INVALID"
+  | "CITY_INVALID";
 
 export class OrderCreateError extends Error {
   code: OrderCreateErrorCode;
@@ -267,7 +271,25 @@ export async function createOrderFromCart(
       tx
     );
 
-    const selectedRoute = await findBestRouteForCity(cityId, new Date(), tx);
+    // 6.b) Ciudad y ruta 100% server-side (Fase 5A, fuente única
+    // resolveShippingRouteForCity): la ciudad debe existir y estar activa —
+    // si no, CITY_INVALID 400 y la tx aborta sin Order parcial ni carrito
+    // convertido. routeId es SIEMPRE snapshot de la ruta de la relación
+    // server-side de la ciudad; el navegador nunca propone ruta.
+    let orderCityId: string | null = null;
+    let selectedRoute: Awaited<ReturnType<typeof resolveShippingRouteForCity>>["route"] = null;
+    if (cityId) {
+      try {
+        const resolved = await resolveShippingRouteForCity(cityId, tx);
+        orderCityId = resolved.city.id;
+        selectedRoute = resolved.route;
+      } catch (error) {
+        if (error instanceof CityResolutionError) {
+          throw new OrderCreateError("CITY_INVALID", error.message, 400);
+        }
+        throw error;
+      }
+    }
     const orderNumber = await generateOrderNumber(tx);
 
     const created = await tx.order.create({
@@ -281,7 +303,7 @@ export async function createOrderFromCart(
         customerEmail: normalizedEmail,
         customerPhone: normalizedPhone,
         customerCompany: safeCompany,
-        cityId: cityId || null,
+        cityId: orderCityId,
         routeId: selectedRoute?.id || null,
         notes: safeNotes,
         subtotal: validatedResult.subtotal,

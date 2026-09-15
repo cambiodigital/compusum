@@ -10,6 +10,12 @@ import {
 } from "./order-cart-upsert";
 import { validateAndPriceItems, CartValidationError } from "./cart-validation";
 import { resolveServerPricingCustomer } from "./pricing";
+import {
+  parseCityIdMutation,
+  resolveShippingRouteForCity,
+  CityResolutionError,
+  type CityIdMutation,
+} from "./city-route";
 
 /**
  * SERVICIOS DE MUTACIÓN DE CARRITO (Fase 3) — única disciplina compartida.
@@ -34,7 +40,8 @@ export interface SaveCartChangesInput {
   /** "save" | "add" | "update" | "clear" | "remove" (default "save"). */
   action?: unknown;
   items?: unknown;
-  cityId?: string | null;
+  /** Tri-state canónico: undefined conserva, null limpia, string válida actualiza. */
+  cityId?: unknown;
   customerName?: unknown;
   customerEmail?: unknown;
   customerPhone?: unknown;
@@ -57,6 +64,47 @@ type FreshCartItem = {
   productId: string;
   variantId: string | null;
 };
+
+/**
+ * Fase 5A — ciudad del carrito con la semántica canónica tri-state
+ * (src/lib/city-route.ts): undefined conserva, null limpia, string válida
+ * actualiza tras validar server-side. Un cityId inválido es 400 limpio
+ * (CartValidationError) y NO un P2003 convertido en 500.
+ */
+function cityMutationOr400(cityId: unknown): CityIdMutation {
+  try {
+    return parseCityIdMutation(cityId);
+  } catch (error) {
+    if (error instanceof CityResolutionError) {
+      throw new CartValidationError(error.message);
+    }
+    throw error;
+  }
+}
+
+/** Valida la ciudad destino DENTRO de la tx y ANTES de cualquier write. */
+async function validatedCityIdOrThrow(
+  mutation: CityIdMutation,
+  tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]
+): Promise<string | null> {
+  if (mutation.action !== "set") return null;
+  try {
+    const { city } = await resolveShippingRouteForCity(mutation.cityId, tx);
+    return city.id;
+  } catch (error) {
+    if (error instanceof CityResolutionError) {
+      throw new CartValidationError(error.message);
+    }
+    throw error;
+  }
+}
+
+/** Fragmento de cityId para cart.update según la mutación clasificada. */
+function cityIdUpdateFragment(mutation: CityIdMutation, validatedCityId: string | null) {
+  if (mutation.action === "clear") return { cityId: null as string | null };
+  if (mutation.action === "set") return { cityId: validatedCityId as string | null };
+  return {};
+}
 
 /**
  * POST /api/carts — guardar/agregar/actualizar líneas o vaciar el carrito
@@ -82,6 +130,11 @@ export async function saveCartChanges(
   const viewer = input.viewer;
   const action = (typeof rawAction === "string" ? rawAction : "save") as SaveCartAction;
 
+  // Fase 5A: clasificación canónica del cityId (400 limpio si el tipo es
+  // inválido; la validación contra el maestro de ciudades ocurre dentro
+  // de la tx, antes de cualquier escritura).
+  const cityMutation = cityMutationOr400(cityId);
+
   const itemsArray = Array.isArray(items) ? items : null;
 
   // Sin items utilizables: "save"/"clear" VACÍAN el carrito; cualquier otra
@@ -95,9 +148,13 @@ export async function saveCartChanges(
         await lockGuestSessionIdentity(tx, viewer.sessionId);
         await lockUserCartIdentity(tx, viewer.userId);
 
+        // Fase 5A: la ciudad se valida ANTES del upsert (el CREATE incluye
+        // cityId; un string inválido sería un P2003 tardío).
+        const validatedCityId = await validatedCityIdOrThrow(cityMutation, tx);
+
         // Adquisición DENTRO de la tx (disciplina de advisory locks): la
         // exclusión de creadores concurrentes la dan los advisories.
-        const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, cityId, tx);
+        const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, validatedCityId, tx);
         await lockCartForMutation(tx, cart.id, viewer);
         await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
         const updated = await tx.cart.update({
@@ -105,6 +162,8 @@ export async function saveCartChanges(
           data: {
             subtotal: 0,
             updatedAt: new Date(),
+            // Fase 5A: el carrito EXISTENTE también actualiza/limpia su ciudad.
+            ...cityIdUpdateFragment(cityMutation, validatedCityId),
           },
           include: { items: true },
         });
@@ -122,8 +181,12 @@ export async function saveCartChanges(
     await lockGuestSessionIdentity(tx, viewer.sessionId);
     await lockUserCartIdentity(tx, viewer.userId);
 
+    // Fase 5A: ciudad validada antes del upsert y aplicada también al
+    // carrito EXISTENTE (antes solo se fijaba al crear).
+    const validatedCityId = await validatedCityIdOrThrow(cityMutation, tx);
+
     // Adquisición DENTRO de la tx (disciplina de advisory locks).
-    const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, cityId, tx);
+    const cart = await upsertActiveCart(viewer.sessionId, viewer.userId, validatedCityId, tx);
 
     // Única disciplina: lock + re-lectura autoritativa + re-check de
     // status/ownership antes de escribir líneas/subtotal/metadata.
@@ -265,6 +328,9 @@ export async function saveCartChanges(
         customerPhone: customerPhone || undefined,
         customerCompany: customerCompany || undefined,
         notes: notes || undefined,
+        // Fase 5A: semántica tri-state (undefined conserva / null limpia /
+        // string válida ya validada actualiza) también en carrito existente.
+        ...cityIdUpdateFragment(cityMutation, validatedCityId),
         subtotal,
         updatedAt: new Date(),
       },
@@ -389,6 +455,11 @@ export async function updateCartByUuid(
     notes,
   } = body;
 
+  // Fase 5A: clasificación canónica tri-state (undefined conserva / null
+  // limpia / string válida actualiza). Corrige el histórico `cityId || null`
+  // con el que un PUT de solo notes/items borraba la ciudad del carrito.
+  const cityMutation = cityMutationOr400(cityId);
+
   // La ruta ya validó forma de `items` y propiedad con lecturas previas;
   // aquí se re-lee para tener id/subtotal de referencia.
   const existingCart = await db.cart.findUnique({ where: { uuid } });
@@ -451,6 +522,10 @@ export async function updateCartByUuid(
       );
     }
 
+    // Fase 5A: la ciudad destino se valida DENTRO de la tx y ANTES del
+    // update (única escritura): inválida/inactiva => 400 y cero writes.
+    const validatedCityId = await validatedCityIdOrThrow(cityMutation, tx);
+
     return tx.cart.update({
       where: { uuid },
       data: {
@@ -460,7 +535,8 @@ export async function updateCartByUuid(
         customerEmail: customerEmail as string | null | undefined,
         customerPhone: customerPhone as string | null | undefined,
         customerCompany: customerCompany as string | null | undefined,
-        cityId: cityId || null,
+        // Semántica canónica tri-state (ver cityMutationOr400 arriba).
+        ...cityIdUpdateFragment(cityMutation, validatedCityId),
         notes: notes as string | null | undefined,
         // El subtotal SOLO se escribe cuando `items` viene en el body: un PUT
         // de solo metadata no toca el subtotal (ni siquiera para reescribirlo
