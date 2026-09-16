@@ -121,7 +121,9 @@ uploads_archive_sha256=$UP_SHA
 uploads_source_dir=$UPLOADS_BASE
 EOF
 
-sha256sum "$DB_OUT" "$UPLOADS_OUT" > "$DEST_DIR/SHA256SUMS"
+# Checksums con nombres RELATIVOS: validar una copia del backup debe verificar
+# los archivos de ESA copia, nunca los originales por ruta absoluta.
+( cd "$DEST_DIR" && sha256sum "db.dump" "uploads.tar.gz" > SHA256SUMS )
 
 # Verificacion final del manifest: el backup debe autenticarse a si mismo.
 ( cd "$DEST_DIR" && sha256sum -c SHA256SUMS >/dev/null )

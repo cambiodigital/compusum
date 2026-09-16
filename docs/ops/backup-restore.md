@@ -69,7 +69,20 @@ PG_RESTORE_CMD="docker run --rm -i postgres:16-alpine pg_restore" \
 ```
 
 El script valida manifest + checksums **antes** de tocar nada: un backup
-corrupto aborta sin restaurar.
+corrupto aborta sin restaurar. Los uploads se colocan **SIEMPRE exactamente**
+en el directorio indicado con `--uploads-dir`, independientemente del basename
+original contenido en el backup (extracción vía staging temporal con
+verificación de estructura); cualquier basename destino es válido.
+
+> Nota: desde el microfix de Fase 7, `SHA256SUMS` usa rutas relativas; los
+> backups previos siguen siendo válidos en la máquina donde se crearon.
+
+Prueba reproducible del ciclo (levanta su propio PostgreSQL efímero en
+Docker, no toca otros entornos):
+
+```bash
+sh scripts/test-restore-uploads.sh
+```
 
 ### Después de un restore
 
