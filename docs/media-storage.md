@@ -109,3 +109,65 @@ no forma parte de F6A: pertenece a la operación/Fase 7.
   explícito.
 - No está confirmado cuántas réplicas usa producción actualmente: verificarlo
   antes de cualquier cambio de topología.
+
+## Fase 6 (cierre) — Política de lifecycle: uploads inmutables + cleanup centralizado
+
+**Regla:** los writes de negocio (PUT/DELETE de Product, Brand, Category, Season,
+Banner, Settings) **solo modifican referencias en DB**. Jamás borran archivos
+físicos: una misma URL `/uploads/X` puede estar compartida por varias entidades
+y un borrado ingenuo rompería referencias.
+
+El borrado físico es exclusivo del mecanismo administrativo:
+
+- Resolver canónico: `src/lib/media-references.ts`
+  - Campos considerados media: `ProductImage.imagePath/thumbnailPath`,
+    `Category.image`, `Brand.logo`, `Season.image`,
+    `Banner.imageDesktop/imageMobile` y `Setting.value` (escaneo conservador
+    de `/uploads/...` embebidos; un falso positivo solo impide borrados,
+    nunca los causa).
+  - Solo se resuelve a path físico lo estrictamente interno:
+    `/uploads/<filename>` (o absolujo del propio origen con ese path, o bare
+    filename legacy). `http(s)://` externos, `data:`, `blob:`, rutas fuera de
+    `/uploads` y traversal se rechazan siempre.
+
+- Cleanup: `POST/GET /api/admin/upload/orphans` (lógica en
+  `src/lib/media-orphan-cleanup.ts`)
+  - `GET` = **dry-run (default seguro)**: inventario físico vs referencias
+    vivas, candidatos huérfanos (>=24h), bytes recuperables, omitidos por
+    antigüedad/seguridad y errores. **Nunca borra.**
+  - `POST {"mode":"delete"}` = borrado físico, **solo rol `admin` estricto**
+    (editor/AGENT/CUSTOMER/anónimo => 403). Por cada candidato: filename
+    seguro dentro de `getUploadsDirectory()`, `lstat` (fichero regular, sin
+    symlinks), antigüedad >= 24h (piso fijo), **re-check de referencias DB
+    inmediatamente antes del `unlink`**, `ENOENT` idempotente, otros errores
+    reportados sin abortar.
+  - Sin cron ni ejecución automática: siempre acción manual y auditada.
+
+- Resultado parcial del batch upload: un fallo DB en autoAssign de un archivo
+  ya no aborta el lote con 500; el archivo fallido se compensa (unlink
+  exclusivo del que acaba de crear la petición), se reporta en `errors[]` y
+  el resto del lote continúa (evita reintentos que duplicaban el lote).
+
+### Runbook de limpieza (manual, entorno que toque)
+
+```bash
+# 1) Revisar candidatos (NO borra nada)
+curl -s -b <cookie-admin> https://<host>/api/admin/upload/orphans | jq
+
+# 2) Borrado explícito (solo admin)
+curl -s -X POST -b <cookie-admin> \
+  -H 'content-type: application/json' \
+  -d '{"mode":"delete"}' \
+  https://<host>/api/admin/upload/orphans | jq
+```
+
+Ambas llamadas devuelven un informe auditable (`deleted`, `skipped`,
+`errors`, `freedBytes`). Repetir el dry-run después del delete debe mostrar
+los candidatos eliminados y mantener en cero los referenciados.
+
+### Media muerta conocida (P2, no bloquea el cierre de Fase 6)
+
+- `Banner` (imageDesktop/imageMobile): sin consumer de storefront.
+- `Season.image`: sin consumer de storefront.
+- `logo_url`/`favicon_url` (Setting): se editan en admin/configuración pero
+  no se renderizan aún en el layout público.

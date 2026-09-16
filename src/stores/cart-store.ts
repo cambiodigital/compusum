@@ -14,6 +14,8 @@ export interface CartProduct {
   minWholesaleQty: number;
   stockStatus: string;
   catalogMode?: boolean;
+  /** Fase 6: imagen resuelta al momento de agregar (persistida con el carrito). */
+  image?: string | null;
   brand?: { name: string; slug: string; catalogMode?: boolean } | null;
   category?: { name: string; slug: string; catalogMode?: boolean } | null;
 }

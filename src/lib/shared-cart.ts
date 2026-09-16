@@ -137,6 +137,8 @@ export interface SharedCartItemDTO {
     minWholesaleQty: number;
     stockStatus: string;
     catalogMode: boolean;
+    /** Fase 6: imágenes reales para el visor (ordenadas por sortOrder). */
+    images: Array<{ imagePath: string; isPrimary: boolean; sortOrder: number }>;
     brand: { name: string; slug: string; catalogMode?: boolean } | null;
     category: { name: string; slug: string; catalogMode?: boolean } | null;
   };
@@ -200,6 +202,7 @@ interface CartWithItems {
       minWholesaleQty: number;
       stockStatus: string;
       catalogMode: boolean;
+      images?: Array<{ imagePath: string; isPrimary: boolean; sortOrder: number }> | null;
       brand: { name: string; slug: string; catalogMode?: boolean } | null;
       category: { name: string; slug: string; catalogMode?: boolean } | null;
     };
@@ -238,6 +241,11 @@ export function buildSharedCartDTO(
         minWholesaleQty: item.product.minWholesaleQty,
         stockStatus: item.product.stockStatus,
         catalogMode: item.product.catalogMode,
+        images: (item.product.images ?? []).map((img) => ({
+          imagePath: img.imagePath,
+          isPrimary: img.isPrimary,
+          sortOrder: img.sortOrder,
+        })),
         brand: item.product.brand,
         category: item.product.category,
       },

@@ -49,6 +49,11 @@ export default async function AdminCartDetailPage({ params }: Props) {
         include: {
           product: {
             include: {
+              // Fase 6: imágenes reales en el detalle admin del carrito.
+              images: {
+                orderBy: { sortOrder: "asc" },
+                select: { imagePath: true, isPrimary: true, sortOrder: true },
+              },
               brand: { select: { name: true } },
               category: { select: { name: true } },
             },
@@ -196,7 +201,7 @@ export default async function AdminCartDetailPage({ params }: Props) {
                   <div key={item.id} className="flex items-center gap-3 px-4 py-3">
                     <div className="relative w-12 h-12 flex-shrink-0 bg-slate-50 rounded-lg overflow-hidden">
                       <SafeProductImage
-                        src={resolveProductImageSrc(item.product.slug, "60/60")}
+                        src={resolveProductImageSrc(item.product)}
                         alt={item.product.name}
                         fill
                         className="object-cover"

@@ -27,6 +27,7 @@ import {
   resolveBrandLogoSrc,
   resolveBrandName,
   resolveBrandSlug,
+  resolveProductImageList,
   resolveProductImageSrc,
   resolveProductName,
   resolveProductSlug,
@@ -183,6 +184,8 @@ export default async function ProductDetailPage({ params }: PageProps) {
   const productSlug = resolveProductSlug(product.slug);
   const brandName = resolveBrandName(product.brand?.name);
   const brandSlug = resolveBrandSlug(product.brand?.slug);
+  // Fase 6: galería real (máx. 4) desde ProductImage; vacía => sin thumbnails.
+  const galleryImages = resolveProductImageList(product, 4);
 
   return (
     <div className="min-h-screen flex flex-col bg-white">
@@ -221,7 +224,7 @@ export default async function ProductDetailPage({ params }: PageProps) {
               <div className="space-y-4">
                 <div className="relative aspect-square bg-gray-50 rounded-2xl overflow-hidden">
                   <SafeProductImage
-                    src={resolveProductImageSrc(product.slug, "800/800")}
+                    src={resolveProductImageSrc(product)}
                     alt={productName}
                     fill
                     className="object-cover"
@@ -244,23 +247,25 @@ export default async function ProductDetailPage({ params }: PageProps) {
                     )}
                   </div>
                 </div>
-                {/* Thumbnails */}
-                <div className="grid grid-cols-4 gap-2">
-                  {[1, 2, 3, 4].map((i) => (
-                    <div 
-                      key={i}
-                      className="aspect-square bg-gray-100 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-primary transition-all"
-                    >
-                      <SafeProductImage
-                        src={resolveProductImageSrc(`${productSlug}-${i}`, "200/200")}
-                        alt={`${productName} - Imagen ${i}`}
-                        width={100}
-                        height={100}
-                        className="object-cover w-full h-full"
-                      />
-                    </div>
-                  ))}
-                </div>
+                {/* Thumbnails — Fase 6: imágenes reales; sin imágenes no se inventan */}
+                {galleryImages.length > 0 && (
+                  <div className="grid grid-cols-4 gap-2">
+                    {galleryImages.map((src, i) => (
+                      <div
+                        key={src}
+                        className="aspect-square bg-gray-100 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-primary transition-all"
+                      >
+                        <SafeProductImage
+                          src={src}
+                          alt={`${productName} - Imagen ${i + 1}`}
+                          width={100}
+                          height={100}
+                          className="object-cover w-full h-full"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Product Info */}
@@ -389,6 +394,8 @@ export default async function ProductDetailPage({ params }: PageProps) {
                     resolvedPrice: (product as any).resolvedPrice ?? null,
                     minWholesaleQty: product.minWholesaleQty,
                     stockStatus: product.stockStatus,
+                    // Fase 6: imagen real que viaja al carrito desde el detalle.
+                    image: resolveProductImageSrc(product),
                     brand: product.brand ? { name: product.brand.name, slug: product.brand.slug } : null,
                     category: product.category ? { name: product.category.name, slug: product.category.slug } : null,
                     variants:
