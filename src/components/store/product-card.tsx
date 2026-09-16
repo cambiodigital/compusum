@@ -37,6 +37,10 @@ interface Product {
   catalogMode?: boolean;
   variantCount?: number;
   resolvedPrice?: ResolvedPriceView | null;
+  /** Fase 6: imágenes reales (forma Prisma o plana según la consulta). */
+  images?: Array<{ imagePath: string; isPrimary?: boolean; sortOrder?: number }> | null;
+  primaryImage?: string | null;
+  image?: string | null;
   brand?: {
     name: string;
     slug: string;
@@ -86,10 +90,12 @@ export function ProductCard({ product, variant = "default", globalCatalogMode = 
 
   // Espejo del precio resuelto en el CartProduct: el carrito del navegador
   // muestra el precio autorizado; el servidor SIEMPRE recalcula al guardar.
+  // Fase 6: la imagen real viaja en el CartProduct para carrito/cross-sell.
+  const resolvedImage = resolveProductImageSrc(product);
   const cartProduct: CartProduct =
     resolved && !resolved.requiresQuote && resolved.unitPrice != null
-      ? { ...(product as CartProduct), price: resolved.unitPrice, wholesalePrice: resolved.unitPrice }
-      : (product as CartProduct);
+      ? { ...(product as CartProduct), price: resolved.unitPrice, wholesalePrice: resolved.unitPrice, image: resolvedImage }
+      : { ...(product as CartProduct), image: resolvedImage };
 
   const stockStatusConfig = {
     disponible: { label: "Disponible", className: "bg-green-50 text-green-700 border-green-200" },
@@ -106,7 +112,7 @@ export function ProductCard({ product, variant = "default", globalCatalogMode = 
         <div className="flex gap-3 p-3">
           <div className="relative w-20 h-20 flex-shrink-0 bg-slate-50 rounded-lg overflow-hidden">
             <SafeProductImage
-              src={resolveProductImageSrc(product.slug, "100/100")}
+              src={resolveProductImageSrc(product)}
               alt={productName}
               fill
               className="object-cover group-hover:scale-105 transition-transform duration-300"
@@ -141,7 +147,7 @@ export function ProductCard({ product, variant = "default", globalCatalogMode = 
       <div className="relative aspect-square overflow-hidden bg-slate-50">
         <Link href={`/producto/${productSlug}`}>
           <SafeProductImage
-            src={resolveProductImageSrc(product.slug, "400/400")}
+            src={resolveProductImageSrc(product)}
             alt={productName}
             fill
             className="object-cover group-hover:scale-105 transition-transform duration-500"

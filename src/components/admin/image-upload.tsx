@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Upload, Loader2 } from "lucide-react";
+import { extractFirstUploadedUrl } from "@/lib/upload-response";
 
 interface ImageUploadProps {
   value: string;
@@ -32,12 +33,16 @@ export function ImageUpload({ value, onChange, label, placeholder = "https://...
       const res = await fetch("/api/admin/upload", { method: "POST", body: form });
       const data = await res.json();
 
-      if (!res.ok || !data.success) {
-        setError(data.error || "Error al subir imagen");
+      // Contrato F6A: la respuesta expone data.uploaded[] (no data.url).
+      // El parser es fail-closed: sin URL válida muestra error y NUNCA
+      // invoca onChange con un valor vacío.
+      const extraction = extractFirstUploadedUrl(data);
+      if (!extraction.ok) {
+        setError(extraction.error);
         return;
       }
 
-      onChange(data.url);
+      onChange(extraction.url);
     } catch {
       setError("Error de conexión al subir imagen");
     } finally {

@@ -20,6 +20,8 @@ interface CrossSellProduct {
   wholesalePrice: number | null;
   minWholesaleQty: number;
   stockStatus: string;
+  /** Fase 6: imagen primaria plana que ya provee /api/products. */
+  primaryImage?: string | null;
   brand?: { name: string; slug: string } | null;
   category?: { name: string; slug: string } | null;
 }
@@ -73,7 +75,8 @@ export function CrossSellSection() {
   if (suggestions.length === 0 || loading) return null;
 
   const handleAdd = (product: CrossSellProduct) => {
-    addItem(product as CartProduct, 1);
+    // Fase 6: la imagen real viaja al carrito (viene de /api/products).
+    addItem({ ...(product as CartProduct), image: resolveProductImageSrc(product) }, 1);
     toast.success("Producto agregado", { description: resolveProductName(product.name) });
     setSuggestions((prev) => prev.filter((p) => p.id !== product.id));
   };
@@ -92,7 +95,7 @@ export function CrossSellSection() {
           <div key={product.id} className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors">
             <div className="relative w-10 h-10 flex-shrink-0 bg-slate-50 rounded overflow-hidden">
               <SafeProductImage
-                src={resolveProductImageSrc(product.slug, "60/60")}
+                src={resolveProductImageSrc(product)}
                 alt={productName}
                 fill
                 className="object-cover"

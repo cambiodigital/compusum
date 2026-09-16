@@ -28,7 +28,7 @@ export function CartItemRow({ item, hidePrices = false }: CartItemRowProps) {
       {/* Image */}
       <div className="relative w-16 h-16 flex-shrink-0 bg-slate-50 rounded-lg overflow-hidden">
         <SafeProductImage
-          src={resolveProductImageSrc(item.product.slug, "100/100")}
+          src={resolveProductImageSrc(item.product)}
           alt={productName}
           fill
           className="object-cover"

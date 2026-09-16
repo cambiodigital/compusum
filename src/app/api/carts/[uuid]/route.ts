@@ -34,6 +34,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           include: {
             product: {
               include: {
+                // Fase 6: imágenes reales para el visor del carrito compartido.
+                images: {
+                  orderBy: { sortOrder: "asc" },
+                  select: { imagePath: true, isPrimary: true, sortOrder: true },
+                },
                 brand: { select: { name: true, slug: true, catalogMode: true } },
                 category: { select: { name: true, slug: true, catalogMode: true } },
               },

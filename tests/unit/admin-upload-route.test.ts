@@ -356,16 +356,28 @@ describe('F6B1 — batches coherentes', () => {
   });
 });
 
-describe('F6B1 — compensación archivo → DB', () => {
-  it('writeFile ok + SKU match + productImage.create falla => unlink EXCLUSIVO del archivo generado y error coherente', async () => {
+describe('Cierre F6 — resultado parcial coherente (fallo DB por archivo)', () => {
+  /**
+   * Residual F6B1: un fallo DB en autoAssign durante un batch provocaba un
+   * 500 global que descartaba el resultado parcial (archivos ya subidos) y
+   * empujaba a reintentos que duplicaban el lote. Ahora el fallo de ESTA
+   * iteración se compensa (unlink exclusivo), va a errors[] y el lote
+   * continúa; la respuesta 200 conserva uploaded[]/errors[] coherentes.
+   */
+  it('writeFile ok + SKU match + productImage.create falla => unlink EXCLUSIVO del archivo generado y error por archivo', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockDb.product.findFirst.mockResolvedValue({ id: 'p1', sku: 'prueba' });
     mockDb.productImage.create.mockRejectedValue(new Error('db explode'));
 
     const res = await post(makeForm([PNG_1KB], { autoAssignBySku: 'true' }));
 
-    expect(res.status).toBe(500);
+    // Resultado parcial coherente: el lote NO aborta con 500.
+    expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.success).toBe(false);
+    expect(json.success).toBe(true);
+    expect(json.data.uploadedCount).toBe(0);
+    expect(json.data.errors[0]).toContain('prueba.png');
+    expect(json.data.errors[0]).toContain('no se pudo autoasignar');
 
     // Se escribió exactamente un archivo (el generado internamente, con UUID).
     expect(fsMock.writeFile).toHaveBeenCalledTimes(1);
@@ -377,9 +389,11 @@ describe('F6B1 — compensación archivo → DB', () => {
     expect(fsMock.unlink).toHaveBeenCalledTimes(1);
     expect(fsMock.unlink).toHaveBeenCalledWith(join(getUploadsDirectory(), generated));
     expect(fsMock.unlink).toHaveBeenCalledWith(writtenPath);
+    consoleError.mockRestore();
   });
 
-  it('fallo DB en el archivo actual NO borra archivos exitosos anteriores del lote', async () => {
+  it('fallo DB en el archivo actual NO borra archivos exitosos anteriores del lote y los reporta', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockDb.product.findFirst.mockResolvedValue({ id: 'p1', sku: 'lote' });
     mockDb.productImage.create.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('db down'));
 
@@ -393,7 +407,11 @@ describe('F6B1 — compensación archivo → DB', () => {
       )
     );
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.data.uploadedCount).toBe(1);
+    expect(json.data.uploaded[0].originalName).toBe('uno.png');
+    expect(json.data.errors[0]).toContain('dos.png');
     // Ambos archivos llegaron a escribirse; solo el segundo (fallo DB actual) se compensa.
     expect(fsMock.writeFile).toHaveBeenCalledTimes(2);
     expect(fsMock.unlink).toHaveBeenCalledTimes(1);
@@ -401,9 +419,10 @@ describe('F6B1 — compensación archivo → DB', () => {
     const secondPath = fsMock.writeFile.mock.calls[1][0];
     expect(fsMock.unlink).toHaveBeenCalledWith(secondPath);
     expect(fsMock.unlink).not.toHaveBeenCalledWith(firstPath);
+    consoleError.mockRestore();
   });
 
-  it('writeFile falla => NO se ejecuta DB NI unlink innecesario', async () => {
+  it('writeFile falla => NO se ejecuta DB NI unlink innecesario (500 sistémico intacto)', async () => {
     fsMock.writeFile.mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
 
     const res = await post(makeForm([PNG_1KB], { autoAssignBySku: 'true' }));
@@ -428,20 +447,20 @@ describe('F6B1 — compensación archivo → DB', () => {
     expect(fsMock.unlink).not.toHaveBeenCalled();
   });
 
-  it('cleanup falla (no ENOENT) => se registra pero el error principal se propaga igual', async () => {
+  it('cleanup falla (no ENOENT) => se registra y el lote continúa con error por archivo', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockDb.product.findFirst.mockResolvedValue({ id: 'p1', sku: 'prueba' });
     mockDb.productImage.create.mockRejectedValue(new Error('db explode'));
     fsMock.unlink.mockRejectedValue(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
 
-    try {
-      const res = await post(makeForm([PNG_1KB], { autoAssignBySku: 'true' }));
-      expect(res.status).toBe(500);
-      expect(fsMock.unlink).toHaveBeenCalledTimes(1);
-      expect(consoleError).toHaveBeenCalled();
-    } finally {
-      consoleError.mockRestore();
-    }
+    const res = await post(makeForm([PNG_1KB], { autoAssignBySku: 'true' }));
+
+    // El fallo de limpieza no se oculta (console.error) pero tampoco aborta el lote.
+    expect(res.status).toBe(200);
+    expect(fsMock.unlink).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalled();
+    expect((await res.json()).data.errors[0]).toContain('no se pudo autoasignar');
+    consoleError.mockRestore();
   });
 });
 

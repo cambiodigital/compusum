@@ -21,6 +21,8 @@ interface FeaturedProduct {
   minWholesaleQty: number;
   stockStatus: string;
   catalogMode?: boolean;
+  /** Fase 6: imagen primaria plana que ya provee /api/products. */
+  primaryImage?: string | null;
   brand?: { name: string; slug: string; catalogMode?: boolean } | null;
   category?: { name: string; slug: string; catalogMode?: boolean } | null;
 }
@@ -68,7 +70,8 @@ export function CartFeaturedProducts() {
   if (!enabled || loading || products.length === 0) return null;
 
   const handleAdd = (product: FeaturedProduct) => {
-    addItem(product as CartProduct, 1);
+    // Fase 6: la imagen real viaja al carrito (viene de /api/products).
+    addItem({ ...(product as CartProduct), image: resolveProductImageSrc(product) }, 1);
     toast.success("Producto agregado", { description: resolveProductName(product.name) });
   };
 
@@ -89,7 +92,7 @@ export function CartFeaturedProducts() {
             >
               <div className="relative w-12 h-12 flex-shrink-0 bg-slate-50 rounded-lg overflow-hidden">
                 <SafeProductImage
-                  src={resolveProductImageSrc(product.slug, "60/60")}
+                  src={resolveProductImageSrc(product)}
                   alt={productName}
                   fill
                   className="object-cover"

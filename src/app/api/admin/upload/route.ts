@@ -209,11 +209,15 @@ export async function POST(request: Request) {
           // F6B1 — compensación: el archivo ya está en disco pero la
           // asignación DB falló. Se desvincula únicamente el archivo que
           // esta iteración acaba de crear (nombre generado internamente,
-          // aún no expuesto en ninguna respuesta ni registro) para no
-          // dejar huérfanos. Los archivos exitosos de iteraciones
-          // anteriores permanecen intactos.
+          // aún no expuesto en ninguna respuesta ni registro).
+          // Cierre Fase 6 — resultado parcial coherente: el fallo va a
+          // errors[] y el lote CONTINÚA. Un 500 global descartaba el
+          // resultado parcial (archivos ya subidos) y empujaba a reintentos
+          // que duplicaban el lote completo.
           await compensateFailedUpload(fileName);
-          throw dbError;
+          console.error(`Autoasignación DB falló para ${file.name}:`, dbError);
+          errors.push(`${file.name}: no se pudo autoasignar a producto (reintenta este archivo)`);
+          continue;
         }
       }
 

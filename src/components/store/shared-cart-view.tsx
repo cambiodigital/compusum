@@ -41,6 +41,8 @@ interface SharedCartItem {
     minWholesaleQty: number;
     stockStatus: string;
     catalogMode?: boolean;
+    /** Fase 6: imágenes reales del DTO compartido. */
+    images?: Array<{ imagePath: string; isPrimary: boolean; sortOrder: number }> | null;
     brand?: { name: string; slug: string; catalogMode?: boolean } | null;
     category?: { name: string; slug: string; catalogMode?: boolean } | null;
   };
@@ -230,7 +232,7 @@ export function SharedCartView({ cart, catalogMode = false, canManage = false }:
               <div key={item.id} className="flex gap-3 px-4 py-3 border-b border-slate-100 last:border-0">
                 <div className="relative w-14 h-14 flex-shrink-0 bg-slate-50 rounded-lg overflow-hidden">
                   <SafeProductImage
-                    src={resolveProductImageSrc(item.product.slug, "100/100")}
+                    src={resolveProductImageSrc(item.product)}
                     alt={productName}
                     fill
                     className="object-cover"
