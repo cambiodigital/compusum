@@ -26,6 +26,10 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=80
 ENV HOSTNAME=0.0.0.0
+# Entorno determinista: el horario de negocio se calcula SIEMPRE en
+# America/Bogota de forma explícita (src/lib/route-schedule.ts), nunca a partir
+# de esta variable. Fijarla evita que el comportamiento dependa del host.
+ENV TZ=UTC
 
 # Copiamos la build standalone.
 # El script build de tu package.json ya se encarga de meter 'public' y '.next/static' aquí.
