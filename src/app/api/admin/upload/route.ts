@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { writeFile, mkdir, readdir, stat } from "fs/promises";
+import { writeFile, mkdir, readdir, stat, unlink } from "fs/promises";
 import { join } from "path";
 import { v4 as uuidv4 } from "uuid";
 import { requireAdminApi } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { detectImageFormat, isAllowedImageMime } from "@/lib/media-validation";
 import { getUploadPublicUrl, getUploadsDirectory } from "@/lib/media-storage";
 import { normalizeProductImagePath } from "@/lib/product-fallbacks";
 
-const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 const MAX_SIZE = 5 * 1024 * 1024; // 5MB
 
 function normalizeSkuCandidate(value: string): string {
@@ -39,14 +39,26 @@ function sanitizeBaseName(fileName: string): string {
     .slice(0, 80) || "img";
 }
 
-function extensionForFile(file: File): string {
-  const byType = file.type.split("/")[1]?.replace("jpeg", "jpg") || "";
-  if (byType) return byType;
-
-  const original = file.name || "";
-  const dotIndex = original.lastIndexOf(".");
-  if (dotIndex > 0) return original.slice(dotIndex + 1).toLowerCase();
-  return "jpg";
+/**
+ * F6B1 — Compensación archivo → DB.
+ *
+ * Elimina EXCLUSIVAMENTE el archivo que esta iteración acaba de crear.
+ * El path se construye únicamente desde `getUploadsDirectory()` + el
+ * filename generado internamente (base saneado + UUID + extensión del
+ * detector); NUNCA desde datos del navegador, y jamás toca archivos
+ * preexistentes ni URLs históricas de otros registros.
+ */
+async function compensateFailedUpload(fileName: string): Promise<void> {
+  const fullPath = join(getUploadsDirectory(), fileName);
+  try {
+    await unlink(fullPath);
+  } catch (cleanupError) {
+    // ENOENT: el archivo ya no existe, la compensación ya está satisfecha.
+    if ((cleanupError as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    // Un fallo de limpieza no oculta el error principal: se registra y el
+    // original sigue propagándose.
+    console.error(`Upload cleanup falló para ${fileName}:`, cleanupError);
+  }
 }
 
 async function findProductBySkuCandidates(candidates: string[]) {
@@ -137,21 +149,46 @@ export async function POST(request: Request) {
     const errors: string[] = [];
 
     for (const file of files) {
-      if (!ALLOWED_TYPES.includes(file.type)) {
+      // F6B1 — política MIME: el MIME declarado sigue siendo el primer filtro
+      // de la allowlist (JPEG/PNG/WebP/GIF). Un tipo vacío/desconocido se
+      // rechaza aunque el contenido sea una imagen válida: sin declaración
+      // no hay coincidencia que verificar, y aceptar por magic bytes a
+      // ciegas permitiría contrabandar contenido sin segundo factor.
+      if (!isAllowedImageMime(file.type)) {
         errors.push(`${file.name}: tipo no permitido`);
         continue;
       }
+      // Tamaño ANTES de leer bytes o escribir nada.
       if (file.size > MAX_SIZE) {
         errors.push(`${file.name}: supera 5MB`);
         continue;
       }
 
-      const ext = extensionForFile(file);
+      // F6B1 — autoridad = contenido. El formato real se identifica por
+      // magic bytes antes de cualquier write; File.type NO es confianza.
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const detected = detectImageFormat(bytes);
+      if (!detected) {
+        errors.push(`${file.name}: el contenido no es una imagen válida`);
+        continue;
+      }
+      // Mismatch declarado vs detectado se RECHAZA: no se corrige en
+      // silencio (ni se renombra ni se acepta "por dentro").
+      if (detected.mime !== file.type) {
+        errors.push(`${file.name}: el contenido no coincide con el tipo declarado`);
+        continue;
+      }
+
+      // La extensión persistida proviene del formato DETECTADO, no del MIME
+      // declarado ni de la extensión original del filename. El nombre base
+      // sigue saneándose y el UUID garantiza unicidad/ausencia de traversal.
       const base = sanitizeBaseName(file.name);
-      const fileName = `${base}-${uuidv4()}.${ext}`;
+      const fileName = `${base}-${uuidv4()}.${detected.extension}`;
       const relativeUrl = getUploadPublicUrl(fileName);
 
-      const bytes = await file.arrayBuffer();
+      // Un fallo de writeFile se propaga tal cual (contrato del endpoint:
+      // 500). No se ejecuta DB ni compensación: no hay archivo confirmado
+      // que limpiar y unlink ciego podría borrar un path ajeno.
       await writeFile(join(uploadsDir, fileName), Buffer.from(bytes));
 
       let autoAssigned = false;
@@ -159,13 +196,24 @@ export async function POST(request: Request) {
       let productId: string | null = null;
 
       if (autoAssignBySku) {
-        const candidates = buildSkuCandidates(file.name);
-        const product = await findProductBySkuCandidates(candidates);
-        if (product) {
-          await assignImageToProduct(product.id, relativeUrl);
-          autoAssigned = true;
-          matchedSku = product.sku;
-          productId = product.id;
+        try {
+          const candidates = buildSkuCandidates(file.name);
+          const product = await findProductBySkuCandidates(candidates);
+          if (product) {
+            await assignImageToProduct(product.id, relativeUrl);
+            autoAssigned = true;
+            matchedSku = product.sku;
+            productId = product.id;
+          }
+        } catch (dbError) {
+          // F6B1 — compensación: el archivo ya está en disco pero la
+          // asignación DB falló. Se desvincula únicamente el archivo que
+          // esta iteración acaba de crear (nombre generado internamente,
+          // aún no expuesto en ninguna respuesta ni registro) para no
+          // dejar huérfanos. Los archivos exitosos de iteraciones
+          // anteriores permanecen intactos.
+          await compensateFailedUpload(fileName);
+          throw dbError;
         }
       }
 
