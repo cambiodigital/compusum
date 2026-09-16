@@ -20,6 +20,10 @@ node_modules
 # production
 /build
 
+# Uploads runtime (F6A): dato del volumen persistente /app/public/uploads,
+# nunca artefacto del repo. Ver docs/media-storage.md
+/public/uploads/
+
 # misc
 .DS_Store
 *.pem
