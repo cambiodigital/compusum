@@ -1,4 +1,7 @@
-FROM oven/bun:latest AS base
+# Pin de versión (Fase 7): oven/bun:latest es mutable y una imagen de
+# producción no puede flotar. 1.4.2 es la versión con la que se desarrolla y
+# genera bun.lock; actualizar el pin junto con la toolchain, nunca "a ver".
+FROM oven/bun:1.4.2 AS base
 
 # 1. Dependencias
 FROM base AS deps
@@ -43,5 +46,11 @@ COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 80
+
+# Liveness del contenedor contra /api/health (sin DB: la DB se mide con
+# /api/ready por el orquestador). start-period cubre el bootstrap inicial
+# (migrate deploy + seed pueden tardar en instalaciones nuevas).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD bun -e "const r = await fetch('http://127.0.0.1:' + (process.env.PORT || '80') + '/api/health'); if (!r.ok) process.exit(1);"
 
 CMD ["./docker-entrypoint.sh"]

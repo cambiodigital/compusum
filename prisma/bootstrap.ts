@@ -44,40 +44,50 @@ const run = async (command: string[], errorMessage?: string) => {
   return { stdout, stderr };
 };
 
-await run([bunExecutable, "x", "prisma", "generate"], "Prisma generate failed.");
-
+// POLITICA FAIL-CLOSED (Fase 7):
+// startup = migrate deploy -> validacion -> seed -> app.
+// Si `migrate deploy` falla, el contenedor DEBE fallar. Nunca se marca una
+// migracion failed como rolled-back (P3009) ni se baselinea arbitrariamente
+// (P3005): eso alteraria `_prisma_migrations` para "lograr arrancar" y puede
+// dejar el esquema a medias. La resolucion manual con `prisma migrate resolve`
+// esta documentada en docs/ops/migraciones-recuperacion.md y se ejecuta SOLO
+// como procedimiento de incidente, con humano al mando.
 try {
+  await run([bunExecutable, "x", "prisma", "generate"], "Prisma generate failed.");
   await run([bunExecutable, "x", "prisma", "migrate", "deploy"], "Prisma migrate deploy failed.");
+  await run([bunExecutable, "prisma/validate-operational-alignment.ts"], "Operational schema validation failed.");
+  await run([bunExecutable, "run", "seed"], "Seed failed.");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  const output =
+  const details =
     error instanceof Error && "details" in error && error.details
-      ? `${error.details.stdout}\n${error.details.stderr}`
-      : "";
+      ? error.details
+      : undefined;
 
-  if (!message.includes("Prisma migrate deploy failed.")) {
-    throw error;
+  console.error("-----------------------------------------------------------");
+  console.error("Fallo el arranque de la base de datos (politica fail-closed).");
+  console.error("Paso fallido:", message);
+
+  if (details) {
+    if (details.stdout.trim()) console.error(details.stdout.trim());
+    if (details.stderr.trim()) console.error(details.stderr.trim());
   }
 
-  if (output.includes("P3009")) {
-    const match = output.match(/The `(\S+)` migration started at .* failed/);
-    if (!match) throw error;
-    const failedMigration = match[1];
-    console.log(`Resolving failed migration as rolled-back: ${failedMigration}...`);
-    await run([bunExecutable, "x", "prisma", "migrate", "resolve", "--rolled-back", failedMigration]);
-    await run([bunExecutable, "x", "prisma", "migrate", "deploy"], "Prisma migrate deploy failed after resolving P3009.");
-  } else if (output.includes("P3005")) {
-    console.log("Baselining existing database with 0_init...");
-    try {
-      await run([bunExecutable, "x", "prisma", "migrate", "resolve", "--applied", "0_init"]);
-    } catch {
-      console.log("Skipping baseline resolve because 0_init was already recorded or could not be applied.");
-    }
-    await run([bunExecutable, "x", "prisma", "migrate", "deploy"], "Prisma migrate deploy failed after baseline.");
-  } else {
-    throw error;
+  if (message.includes("P3009") || (details?.stderr ?? "").includes("P3009") || (details?.stdout ?? "").includes("P3009")) {
+    console.error(
+      "Hay una migracion en estado failed (_prisma_migrations). NO se resuelve automaticamente.\n" +
+        "Siga el runbook docs/ops/migraciones-recuperacion.md: corregir la causa y resolver MANUALMENTE con\n" +
+        "`prisma migrate resolve --rolled-back <migration>` (o --applied) antes de reintentar el deploy."
+    );
+  } else if (message.includes("P3005")) {
+    console.error(
+      "La base de datos parece no baselineada (P3005). NO se baselinea automaticamente.\n" +
+        "Siga el runbook docs/ops/migraciones-recuperacion.md para evaluar y, si corresponde, aplicar\n" +
+        "MANUALMENTE `prisma migrate resolve --applied 0_init`."
+    );
   }
+
+  console.error("El contenedor no arrancara hasta que la migracion se recupere manualmente.");
+  console.error("-----------------------------------------------------------");
+  process.exit(1);
 }
-
-await run([bunExecutable, "prisma/validate-operational-alignment.ts"], "Operational schema validation failed.");
-await run([bunExecutable, "run", "seed"], "Seed failed.");
