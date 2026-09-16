@@ -12,3 +12,6 @@ test
 *.log
 local-*
 .env*
+# Uploads runtime (F6A): dato del volumen, nunca artefacto de build.
+# Los assets legítimos de public/ (icono.svg, robots.txt) no se afectan.
+public/uploads

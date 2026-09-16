@@ -4,6 +4,7 @@ import { join } from "path";
 import { v4 as uuidv4 } from "uuid";
 import { requireAdminApi } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getUploadPublicUrl, getUploadsDirectory } from "@/lib/media-storage";
 import { normalizeProductImagePath } from "@/lib/product-fallbacks";
 
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -78,7 +79,7 @@ export async function GET() {
     const { error } = await requireAdminApi();
     if (error) return error;
 
-    const uploadsDir = join(process.cwd(), "public", "uploads");
+    const uploadsDir = getUploadsDirectory();
     await mkdir(uploadsDir, { recursive: true });
 
     const files = await readdir(uploadsDir);
@@ -88,7 +89,7 @@ export async function GET() {
         const info = await stat(fullPath);
         return {
           name,
-          url: `/uploads/${name}`,
+          url: getUploadPublicUrl(name),
           modifiedAt: info.mtime.toISOString(),
           size: info.size,
         };
@@ -122,7 +123,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: "No se recibieron archivos" }, { status: 400 });
     }
 
-    const uploadsDir = join(process.cwd(), "public", "uploads");
+    const uploadsDir = getUploadsDirectory();
     await mkdir(uploadsDir, { recursive: true });
 
     const uploaded: Array<{
@@ -148,7 +149,7 @@ export async function POST(request: Request) {
       const ext = extensionForFile(file);
       const base = sanitizeBaseName(file.name);
       const fileName = `${base}-${uuidv4()}.${ext}`;
-      const relativeUrl = `/uploads/${fileName}`;
+      const relativeUrl = getUploadPublicUrl(fileName);
 
       const bytes = await file.arrayBuffer();
       await writeFile(join(uploadsDir, fileName), Buffer.from(bytes));
