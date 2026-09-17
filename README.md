@@ -116,6 +116,13 @@ bun start
 
 Al construir con el `Dockerfile` actual, proporcione `DATABASE_URL` tanto como argumento de build como variable de entorno del contenedor, ya que el archivo la consume en ambas etapas.
 
+## Operacion (Fase 7)
+
+- **Health/Readiness:** `GET /api/health` (liveness, sin DB) y `GET /api/ready` (ping real a PostgreSQL; 503 si la DB no esta disponible). El contenedor incluye `HEALTHCHECK` contra `/api/health`.
+- **Startup fail-closed:** si `migrate deploy` falla, el contenedor NO arranca; nunca resuelve migraciones automaticamente. Recuperacion manual: `docs/ops/migraciones-recuperacion.md`.
+- **Backup/Restore:** DB + uploads con `scripts/backup.sh` / `scripts/restore.sh`; runbook en `docs/ops/backup-restore.md`. Un backup de solo DB NO es suficiente.
+- **Variables de entorno:** plantilla sin secretos en `.env.example`.
+
 ## Documentacion
 
 - Estructura del repositorio: `docs/estructura-repo.md`

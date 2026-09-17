@@ -18,8 +18,16 @@ Propiedades del contrato:
   `Category.image`, `Brand.logo`, ...) son **solo URLs** `/uploads/<archivo>`.
   PostgreSQL **NO contiene los binarios**.
 - El path físico es fijo y deliberadamente **NO configurable por entorno**.
-  Next.js sirve `/uploads/*` desde `public/`; mover los archivos fuera de esa
+  `/uploads/*` se sirve desde esa carpeta; mover los archivos fuera de esa
   ruta sin añadir una capa de serving alternativa rompería el contrato.
+- **Serving (Fase 7):** `/uploads/<archivo>` lo resuelve el route handler
+  dinámico `src/app/uploads/[filename]/route.ts`, que lee el archivo del
+  directorio canónico en cada petición. Motivo: Next indexa `public/` sólo al
+  arranque, así que un upload hecho con el servidor en caliente recibía 404
+  hasta reiniciar el contenedor (detectado por el smoke E2E de Fase 7). El
+  handler permite sólo nombres planos de imagen (allowlist jpeg/png/webp/gif,
+  sin traversal) y responde `Cache-Control: immutable` (los nombres llevan
+  UUID).
 - La durabilidad **no la da el código sino el volumen**: sin un mount
   persistente en `/app/public/uploads`, cualquier recreación de contenedor
   (redeploy, rebuild, migración de host) pierde todos los archivos, mientras
