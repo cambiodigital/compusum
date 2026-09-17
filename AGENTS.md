@@ -58,9 +58,9 @@ Required standards:
 
 Critical operational expectations:
 
-- `prisma/bootstrap.ts` must continue handling:
-  - `P3005` by baselining `0_init` when appropriate.
-  - `P3009` by resolving the failed migration as rolled back and retrying deploy.
+- `prisma/bootstrap.ts` is fail-closed: startup runs `prisma migrate deploy`, operational validation, and the idempotent seed; if any step fails, the container must exit non-zero.
+- `P3005` and `P3009` must NOT be auto-resolved during startup and bootstrap must never mutate `_prisma_migrations` to force the app to start.
+- Recovery with `prisma migrate resolve` is a manual incident procedure only, after diagnosing the real database state and following `docs/ops/migraciones-recuperacion.md`.
 - Reviews should explicitly call out risk of `P2022`, `P3005`, `P3009`, and unique constraint failures when relevant.
 
 ### Storefront And Business Rules
