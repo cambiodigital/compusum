@@ -82,6 +82,7 @@ export function ProductInfiniteList({
           isNew: p.isNew,
           catalogMode: p.catalogMode,
           variantCount: p.variantCount,
+          primaryImage: p.primaryImage ?? null,
           brand: p.brandName
             ? { name: p.brandName, slug: p.brandSlug, catalogMode: p.brandCatalogMode }
             : p.brand ?? null,

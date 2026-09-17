@@ -11,8 +11,13 @@ export default async function AdminLayout({
 }) {
   const user = await getCurrentUser();
 
+  // Un cliente autenticado (role CUSTOMER) NO puede ir a /admin/login:
+  // esa ruta vive dentro de este mismo segmento /admin, así que este layout
+  // también se le aplica y redirigir a /admin/login produce un bucle de
+  // redirección infinito (página en blanco + ERR_INSUFFICIENT_RESOURCES).
+  // Se le devuelve al storefront; /admin/login queda solo para invitados.
   if (user && !isBackofficeRole(user.role)) {
-    redirect("/admin/login");
+    redirect("/");
   }
 
   return (

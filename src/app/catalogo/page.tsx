@@ -126,6 +126,8 @@ export default async function CatalogoPage({ searchParams }: PageProps) {
       stockStatus: p.stockStatus,
       sortOrder: p.sortOrder,
       createdAt: p.createdAt,
+      // Sin esto ProductCard resuelve "" y todas las cards muestran placeholder.
+      primaryImage: p.primaryImage ?? null,
       category: p.categoryName ? { name: p.categoryName, slug: p.categorySlug!, catalogMode: p.categoryCatalogMode } : null,
       brand: p.brandName ? { name: p.brandName, slug: p.brandSlug!, catalogMode: p.brandCatalogMode } : null,
     }));
