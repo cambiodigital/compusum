@@ -1,0 +1,47 @@
+name: Deploy Dokploy
+
+# Redespliega compusum-app en Dokploy cuando el CI de main termina verde.
+# Actualiza el SHA pineado en el compose (build reproducible) y encola el deploy.
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-dokploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Redesplegar compusum-app con el SHA de main
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          COMPOSE_ID: "3eAhMxCWr6kl3TiEAma4U"
+        run: |
+          set -euo pipefail
+
+          CURRENT=$(curl -fsS -H "x-api-key: $DOKPLOY_API_KEY" \
+            "$DOKPLOY_URL/api/compose.one?composeId=$COMPOSE_ID" | jq -r '.composeFile')
+
+          UPDATED=$(printf '%s' "$CURRENT" \
+            | sed -E "s|compusum\.git#[0-9a-f]{40}|compusum.git#$SHA|" \
+            | sed -E "s|GIT_SHA: \"?[0-9a-f]{40}\"?|GIT_SHA: \"$SHA\"|")
+
+          if [ "$CURRENT" = "$UPDATED" ]; then
+            echo "WARNING: el compose no cambio (revisar patrones sed)"
+          fi
+
+          PAYLOAD=$(jq -n --arg id "$COMPOSE_ID" --arg cf "$UPDATED" '{composeId: $id, composeFile: $cf}')
+          curl -fsS -X POST -H "x-api-key: $DOKPLOY_API_KEY" -H "Content-Type: application/json" \
+            -d "$PAYLOAD" "$DOKPLOY_URL/api/compose.update" > /dev/null
+          curl -fsS -X POST -H "x-api-key: $DOKPLOY_API_KEY" -H "Content-Type: application/json" \
+            -d "{\"composeId\": \"$COMPOSE_ID\"}" "$DOKPLOY_URL/api/compose.deploy"
+
+          echo "Deploy en cola para $SHA"
