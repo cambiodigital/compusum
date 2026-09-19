@@ -6,6 +6,20 @@ import { isBackofficeRole, isAgentRole } from "@/lib/roles";
 // Routes that don't require authentication
 const publicRoutes = ["/admin/login"];
 
+/**
+ * Login unificado: las peticiones no autenticadas a /admin/** caen en
+ * /ingresar?next=<ruta>. El parámetro next se SANE A en el backend tras
+ * autenticar (sanitizeNextPath): nunca acepta URLs externas y nunca permite
+ * que un rol caiga fuera de su alcance.
+ */
+function unifiedLoginUrl(request: NextRequest, nextPath?: string): NextResponse {
+  const loginUrl = new URL("/ingresar", request.url);
+  if (nextPath) {
+    loginUrl.searchParams.set("next", nextPath);
+  }
+  return NextResponse.redirect(loginUrl);
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -73,8 +87,7 @@ export async function proxy(request: NextRequest) {
         { status: 401 }
       );
     }
-    const loginUrl = new URL("/admin/login", request.url);
-    return NextResponse.redirect(loginUrl);
+    return unifiedLoginUrl(request, pathname);
   }
 
   try {
@@ -94,19 +107,21 @@ export async function proxy(request: NextRequest) {
           { status: 401 }
         );
       }
-      const loginUrl = new URL("/admin/login", request.url);
-      return NextResponse.redirect(loginUrl);
+      return unifiedLoginUrl(request, pathname);
     }
 
     if (!isBackofficeRole(session.user.role)) {
+      // CUSTOMER autenticado NO entra al backoffice: se le devuelve al
+      // storefront. Redirigirlo al login produciría un bucle (ver el fix del
+      // layout de /admin): /ingresar con sesión activa lo manda a /mi-cuenta,
+      // así que "/" es el destino seguro y sin ciclo.
       if (isAdminApi) {
         return NextResponse.json(
           { success: false, error: "Acceso denegado: se requiere rol administrativo" },
           { status: 403 }
         );
       }
-      const loginUrl = new URL("/admin/login", request.url);
-      return NextResponse.redirect(loginUrl);
+      return NextResponse.redirect(new URL("/", request.url));
     }
 
     // AGENT comercial: allowlist estricta de rutas del backoffice. Todo lo

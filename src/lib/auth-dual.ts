@@ -1,15 +1,9 @@
 import { db } from './db';
-import { hashPassword, verifyPassword, createSession } from './auth';
-import { DEFAULT_MOCK_PHONE_OTP, PHONE_OTP_LENGTH } from './phone-otp';
+import { verifyPassword, createSession } from './auth';
+import { DEFAULT_MOCK_PHONE_OTP } from './phone-otp';
 import { checkOtpWithTwilio, isTwilioVerifyConfigured, sendOtpWithTwilio } from './twilio-verify';
 import { canonicalColombiaPhone, phoneOrVariants, toE164ColombiaPhone } from './phone';
 import { requireAuthUserDTO, AuthUserDTO } from './user-dto';
-
-function generateTemporaryPassword(): string {
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
 
 function isMockOtpEnabled(): boolean {
   return process.env.ENABLE_MOCK_PHONE_OTP === 'true';
@@ -46,6 +40,12 @@ export async function sendPhoneOtp(phone: string): Promise<{ provider: 'twilio' 
 /**
  * Verifica un código OTP para un teléfono. Reutilizada por login y por el
  * restablecimiento de contraseña (la expiración la gestiona el proveedor).
+ *
+ * LONGITUD EN TRANSICIÓN (4 → 6): la verificación acepta códigos de 4 a 8
+ * dígitos porque la longitud REAL la impone el proveedor (Twilio Verify
+ * CodeLength del servicio). La UI y el mock por defecto ya usan 6; actualizar
+ * el servicio Twilio a CodeLength=6 es un paso de despliegue documentado.
+ * El chequeo local solo descarta basura antes de llamar al proveedor.
  */
 export async function verifyPhoneOtp(phone: string, otpCode: string): Promise<void> {
   const e164Phone = toE164ColombiaPhone(phone);
@@ -55,8 +55,8 @@ export async function verifyPhoneOtp(phone: string, otpCode: string): Promise<vo
 
   const normalizedOtpCode = otpCode.replace(/\D/g, '');
 
-  if (normalizedOtpCode.length !== PHONE_OTP_LENGTH) {
-    throw new Error(`El código OTP debe tener ${PHONE_OTP_LENGTH} dígitos`);
+  if (normalizedOtpCode.length < 4 || normalizedOtpCode.length > 8) {
+    throw new Error('El código OTP debe tener entre 4 y 8 dígitos');
   }
 
   if (isMockOtpEnabled()) {
@@ -91,6 +91,12 @@ export async function findCustomerByPhone(phone: string, tx: any = db) {
   });
 }
 
+/**
+ * Login por OTP de teléfono. LOGIN = SOLO cuentas existentes: si el teléfono
+ * no corresponde a una cuenta activa, NO se crea nada (el registro explícito
+ * vive en /registrarse). El OTP ya fue verificado por el proveedor; el envío
+ * del código está gated por existencia de cuenta en los endpoints unificados.
+ */
 export async function loginWithPhone(
   phone: string,
   otpCode: string,
@@ -100,25 +106,16 @@ export async function loginWithPhone(
 
   await verifyPhoneOtp(phone, otpCode);
 
-  let user = canonicalPhone ? await findCustomerByPhone(canonicalPhone) : null;
+  const user = canonicalPhone ? await findCustomerByPhone(canonicalPhone) : null;
 
   if (user && !user.isActive) {
     throw new Error('Tu cuenta está desactivada. Contacta a tu asesor comercial.');
   }
 
   if (!user) {
-    if (!canonicalPhone) {
-      throw new Error('Número de teléfono colombiano inválido. Usa 10 dígitos, ej: 3001234567.');
-    }
-    // Alta por OTP: SIEMPRE formato canónico y rol CUSTOMER explícito.
-    user = await db.user.create({
-      data: {
-        phone: canonicalPhone,
-        name: 'Nuevo Cliente',
-        role: 'CUSTOMER',
-        password: await hashPassword(generateTemporaryPassword()),
-      }
-    });
+    // Sin alta implícita: OTP válido sobre un teléfono sin cuenta no registra
+    // nada. Mensaje genérico (no revela si el código fue correcto).
+    throw new Error('Código inválido o expirado');
   }
 
   const token = await createSession(user.id, sessionDurationHours);
