@@ -9,9 +9,11 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 
 /**
- * Recuperación de contraseña en dos pasos:
- *  1) Solicitar OTP al teléfono registrado (respuesta genérica anti-enumeración).
- *  2) Verificar OTP + nueva contraseña. Al terminar se cierran todas las sesiones.
+ * Recuperación de contraseña en dos pasos (todos los roles):
+ *  1) Solicitar OTP al canal del identificador: email -> correo (Resend);
+ *     teléfono -> SMS (Twilio). Respuesta genérica anti-enumeración.
+ *  2) Verificar OTP + nueva contraseña. Al terminar se cierran todas las
+ *     sesiones.
  */
 export default function RecuperarPage() {
   const [step, setStep] = useState<"request" | "reset">("request");
@@ -76,7 +78,7 @@ export default function RecuperarPage() {
           <CardHeader>
             <CardTitle className="text-2xl">Recuperar contraseña</CardTitle>
             <CardDescription>
-              Te enviaremos un código al teléfono registrado en tu cuenta.
+              Te enviaremos un código a tu correo o al teléfono registrado en tu cuenta.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -113,7 +115,8 @@ export default function RecuperarPage() {
                   Enviar código
                 </Button>
                 <p className="text-xs text-slate-500 text-center">
-                  Si tu cuenta no tiene teléfono registrado, contacta a tu asesor comercial.
+                  Si tu cuenta no tiene correo ni teléfono registrado, contacta a tu asesor
+                  comercial.
                 </p>
               </form>
             ) : (
@@ -125,12 +128,14 @@ export default function RecuperarPage() {
                 )}
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Código recibido</label>
+                  {/* TRANSICIÓN 4→6: acepta 4–8 dígitos mientras Twilio Verify
+                      aún genere códigos de 4; el email OTP ya usa 6. */}
                   <Input
                     value={otp}
-                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 8))}
                     required
                     inputMode="numeric"
-                    placeholder="1234"
+                    placeholder="123456"
                     className="text-center text-2xl tracking-widest"
                   />
                 </div>

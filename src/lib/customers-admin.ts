@@ -82,9 +82,10 @@ export interface CustomerInput {
 }
 
 /**
- * Normaliza el teléfono de entrada a formato canónico. El teléfono es
- * OBLIGATORIO en cuentas nuevas: es el único canal de recuperación autónoma
- * (OTP) y toda cuenta con acceso web debe poder recuperar su contraseña.
+ * Normaliza el teléfono de entrada a formato canónico. El teléfono sigue
+ * OBLIGATORIO en cuentas nuevas: con la unificación de auth el correo también
+ * permite recuperación autónoma (OTP por Resend), pero el teléfono es el canal
+ * alternativo cuando el cliente no tiene correo (SMS vía Twilio).
  */
 function requireCanonicalPhone(phone?: string | null): string {
   const canonical = canonicalColombiaPhone(phone);

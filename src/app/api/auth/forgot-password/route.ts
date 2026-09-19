@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requestPasswordReset, CustomerAuthError } from '@/lib/customer-auth';
 import { isPhoneOtpLoginEnabled } from '@/lib/auth-dual';
+import { isEmailOtpConfigured } from '@/lib/email-otp';
 import {
   checkRateLimit,
   recordFailedAttempt,
@@ -10,12 +11,17 @@ import {
   FORGOT_WINDOW_MS,
   FORGOT_LOCKOUT_MS,
 } from '@/lib/rate-limit';
-import { canonicalColombiaPhone } from '@/lib/phone';
+import { canonicalColombiaPhone, phoneOrVariants } from '@/lib/phone';
 
 /**
  * Solicitud de restablecimiento de contraseña. La respuesta es SIEMPRE genérica
- * (no revela si la cuenta existe). El reset se completa en /api/auth/reset-password
- * con el OTP recibido por teléfono (Twilio Verify o mock de desarrollo).
+ * (no revela si la cuenta existe). El canal sigue el TIPO de identificador:
+ * email -> OTP por correo (Resend, preferido); teléfono -> OTP por SMS
+ * (Twilio Verify o mock de desarrollo). El reset se completa en
+ * /api/auth/reset-password.
+ *
+ * 503 SOLO cuando el canal del identificador está globalmente sin configurar
+ * (condición que NO depende de la cuenta: no filtra existencia).
  *
  * Rate limit en DOS capas reales (checkRateLimit + recordFailedAttempt): por IP
  * y por identidad normalizada (teléfono canónico o email). Canonicalizar el
@@ -30,10 +36,13 @@ export async function POST(req: NextRequest) {
     const { phoneOrEmail } = body ?? {};
 
     let identifierKey: string | null = null;
+    let isEmailIdentifier = false;
     if (phoneOrEmail) {
       const raw = String(phoneOrEmail);
+      const normalizedEmail = raw.trim().toLowerCase();
+      isEmailIdentifier = normalizedEmail.includes('@');
       const phoneKey = canonicalColombiaPhone(raw);
-      const identity = phoneKey ?? raw.trim().toLowerCase().slice(0, 120);
+      const identity = phoneKey ?? normalizedEmail.slice(0, 120);
       identifierKey = `forgot-password:id:${identity}`;
     }
 
@@ -56,12 +65,19 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (!isPhoneOtpLoginEnabled()) {
+    // Disponibilidad del canal por TIPO de identificador (no por cuenta).
+    const hasPhoneForm = phoneOrEmail ? phoneOrVariants(String(phoneOrEmail)).length > 0 : false;
+    const channelUnavailable = isEmailIdentifier
+      ? !isEmailOtpConfigured()
+      : !hasPhoneForm || !isPhoneOtpLoginEnabled();
+
+    if (channelUnavailable) {
       return NextResponse.json(
         {
           success: false,
-          error:
-            'El restablecimiento por teléfono no está disponible en este momento. Contacta a tu asesor para restablecer tu contraseña.',
+          error: isEmailIdentifier
+            ? 'El restablecimiento por correo no está disponible en este momento. Intenta con tu teléfono o contacta a tu asesor.'
+            : 'El restablecimiento por teléfono no está disponible en este momento. Intenta con tu correo o contacta a tu asesor.',
           code: 'OTP_NOT_CONFIGURED',
         },
         { status: 503 }
@@ -103,7 +119,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       message:
-        'Si tu cuenta tiene un teléfono registrado, recibirás un código para restablecer tu contraseña.',
+        'Si tu cuenta tiene un correo o teléfono registrado, recibirás un código para restablecer tu contraseña.',
     });
   } catch (error) {
     console.error('Forgot password error:', error);

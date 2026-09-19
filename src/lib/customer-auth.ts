@@ -2,17 +2,21 @@ import { db } from './db';
 import { hashPassword, verifyPassword, createSession, generateToken } from './auth';
 import { sendPhoneOtp, verifyPhoneOtp, findCustomerByPhone } from './auth-dual';
 import { canonicalColombiaPhone, phoneOrVariants } from './phone';
+import { issueEmailOtp, verifyEmailOtp, isEmailOtpConfigured } from './email-otp';
 import { toAuthUserDTO, AuthUserDTO } from './user-dto';
 
 /**
  * Flujos de cuenta del CLIENTE final sobre el maestro `User` (role CUSTOMER):
- * registro, cambio de contraseña y restablecimiento vía OTP (reutiliza la
- * infraestructura Twilio/mock existente; no introduce proveedores nuevos).
+ * registro, cambio de contraseña y restablecimiento vía OTP.
  *
- * POLÍTICA DE ACCESO (Fase 2):
- *   - El TELÉFONO es obligatorio en cuentas self-service: es el único canal
- *     de recuperación autónomo actual (OTP por Twilio; no hay proveedor de
- *     email). El correo es dato adicional opcional.
+ * RECUPERACIÓN UNIFICADA: el restablecimiento sirve para TODOS los roles
+ * activos del maestro `User`. El canal sigue el TIPO de identificador:
+ *   - email  -> OTP self-managed de 6 dígitos vía Resend (canal preferido).
+ *   - teléfono -> OTP por SMS vía Twilio Verify (canal alternativo).
+ *
+ * POLÍTICA DE ACCESO (actualizada con la unificación de auth):
+ *   - El teléfono sigue siendo obligatorio en cuentas self-service (registro),
+ *     pero el correo ahora ES vía de recuperación autónoma cuando existe.
  *   - Todo teléfono se persiste canonicalizado (`src/lib/phone.ts`), de modo
  *     que `3001234567`, `+573001234567` y `573001234567` son LA MISMA cuenta.
  */
@@ -184,67 +188,92 @@ export async function changePassword(
   });
 }
 
-/** Busca el cliente dueño de un contacto (teléfono en cualquier forma / email). */
-async function findCustomerByContact(phoneOrEmail: string, tx: any = db) {
-  const email = normalizeCustomerEmail(phoneOrEmail);
-  const phoneVariants = phoneOrVariants(phoneOrEmail);
+/**
+ * Busca el usuario dueño de un contacto para RECUPERACIÓN (todos los roles
+ * activos del maestro `User`): email por unique, teléfono en cualquier forma
+ * almacenada. Determinista: canónico primero.
+ */
+async function findUserByContactForReset(phoneOrEmail: string, tx: any = db) {
+  const rawEmail = normalizeCustomerEmail(phoneOrEmail);
+  // Solo un identificador CON forma de email se busca por email: un teléfono
+  // (10 dígitos) normalizado nunca debe caer en la rama email.
+  const email = rawEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
 
-  const orConditions = [
-    ...(email ? [{ email }] : []),
-    ...phoneVariants,
-  ];
-  if (orConditions.length === 0) return null;
+  if (email) {
+    return (tx ?? db).user.findUnique({
+      where: { email },
+      select: { id: true, phone: true, email: true, emailVerifiedAt: true, isActive: true },
+    });
+  }
+
+  const phoneVariants = phoneOrVariants(phoneOrEmail);
+  if (phoneVariants.length === 0) return null;
 
   return (tx ?? db).user.findFirst({
-    where: {
-      role: { equals: 'CUSTOMER', mode: 'insensitive' },
-      OR: orConditions,
-    },
-    select: { id: true, phone: true, isActive: true },
+    where: { OR: phoneVariants },
+    select: { id: true, phone: true, email: true, emailVerifiedAt: true, isActive: true },
   });
 }
 
 /**
- * Solicita restablecimiento de contraseña. Envía un OTP al teléfono del
- * usuario si existe y el proveedor está configurado. La respuesta es
- * genérica para evitar enumeración de cuentas.
+ * Solicita restablecimiento de contraseña. Canal según el TIPO de
+ * identificador: email -> OTP por correo (Resend, preferido); teléfono -> OTP
+ * por SMS (Twilio). La respuesta es genérica para evitar enumeración de
+ * cuentas; `otpNotConfigured` solo refleja CONFIGURACIÓN GLOBAL del canal
+ * (nunca existencia de cuenta).
  */
 export async function requestPasswordReset(
   phoneOrEmail: string
 ): Promise<{ otpSent: boolean; otpNotConfigured: boolean }> {
-  const email = normalizeCustomerEmail(phoneOrEmail);
+  const rawEmail = normalizeCustomerEmail(phoneOrEmail);
+  const email = rawEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
   const phoneVariants = phoneOrVariants(phoneOrEmail);
 
   if (!email && phoneVariants.length === 0) {
     throw new CustomerAuthError('INVALID_CONTACT', 'Ingresa tu correo o teléfono.');
   }
 
-  const user = await findCustomerByContact(phoneOrEmail);
+  if (email && !isEmailOtpConfigured()) {
+    // Canal email globalmente sin configurar: falla sin mirar la cuenta.
+    return { otpSent: false, otpNotConfigured: true };
+  }
 
-  if (!user || !user.isActive || !user.phone) {
-    // Respuesta genérica: no revelar si la cuenta existe o tiene teléfono.
+  const user = await findUserByContactForReset(phoneOrEmail);
+
+  if (!user || !user.isActive) {
+    // Respuesta genérica: no revelar si la cuenta existe.
     return { otpSent: false, otpNotConfigured: false };
   }
 
   try {
-    await sendPhoneOtp(user.phone);
+    if (email) {
+      await issueEmailOtp(email, 'password_reset');
+    } else {
+      if (!user.phone) {
+        // Sin teléfono en la cuenta: respuesta genérica (puede reintentar
+        // con su correo, que ahora también recupera).
+        return { otpSent: false, otpNotConfigured: false };
+      }
+      await sendPhoneOtp(user.phone);
+    }
     return { otpSent: true, otpNotConfigured: false };
   } catch {
-    // OTP no configurado u error del proveedor
+    // OTP no configurado u error del proveedor: detalle solo en log.
     return { otpSent: false, otpNotConfigured: true };
   }
 }
 
 /**
- * Restablece la contraseña verificando el OTP del teléfono. Al terminar,
+ * Restablece la contraseña verificando el OTP del canal correspondiente al
+ * identificador (email -> OTP self-managed; teléfono -> Twilio). Al terminar,
  * CIERRA todas las sesiones activas del usuario (el atacante con sesión
  * abierta pierde el acceso y el usuario real vuelve a entrar).
  *
- * ANTI-ENUMERACIÓN: cuenta inexistente, inactiva, sin teléfono y OTP
- * inválido/expirado producen EXACTAMENTE el mismo error genérico
- * (GENERIC_RESET_FAILURE). NUNCA se verifica un email/identificador
- * desconocido contra el proveedor: el error técnico de formato filtraría la
- * existencia de la cuenta. Los mensajes del proveedor no se propagan.
+ * ANTI-ENUMERACIÓN: cuenta inexistente, inactiva, sin canal, OTP
+ * inválido/expirado o proveedor caído producen EXACTAMENTE el mismo error
+ * genérico (GENERIC_RESET_FAILURE). Los mensajes del proveedor no se
+ * propagan. Un reset por email exitoso también marca `emailVerifiedAt`
+ * (prueba de posesión del correo).
  */
 export async function resetPasswordWithOtp(
   phoneOrEmail: string,
@@ -253,34 +282,63 @@ export async function resetPasswordWithOtp(
 ): Promise<void> {
   validatePasswordStrength(newPassword);
 
-  const user = await findCustomerByContact(phoneOrEmail);
+  const rawEmail = normalizeCustomerEmail(phoneOrEmail);
+  const email = rawEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
+  const user = await findUserByContactForReset(phoneOrEmail);
 
-  if (!user || !user.isActive || !user.phone) {
-    // Falla genérica SIN llamar al proveedor: no hay teléfono real contra el
-    // cual verificar, y verificar el identificador crudo (p.ej. un email)
-    // produciría un error de formato distinguible del de un OTP inválido.
+  if (!user || !user.isActive) {
+    // Falla genérica SIN llamar al proveedor.
     throw new CustomerAuthError('RESET_FAILED', GENERIC_RESET_FAILURE);
   }
 
-  try {
-    await verifyPhoneOtp(user.phone, otpCode);
-  } catch (otpError) {
-    // OTP inválido/expirado, proveedor no configurado o fallo del proveedor:
-    // MISMA respuesta externa que una cuenta inexistente. Detalle solo en log.
-    console.warn(
-      '[RESET_PASSWORD] Verificación OTP fallida (respuesta genérica al cliente):',
-      otpError instanceof Error ? otpError.message : otpError
-    );
-    throw new CustomerAuthError('RESET_FAILED', GENERIC_RESET_FAILURE);
-  }
+  if (email) {
+    if (!user.email || !isEmailOtpConfigured()) {
+      throw new CustomerAuthError('RESET_FAILED', GENERIC_RESET_FAILURE);
+    }
 
-  await db.user.update({
-    where: { id: user.id },
-    data: {
-      password: await hashPassword(newPassword),
-      passwordChangedAt: new Date(),
-    },
-  });
+    try {
+      await verifyEmailOtp(user.email, 'password_reset', otpCode);
+    } catch (otpError) {
+      // OTP inválido/expirado/agotado o canal caído: MISMA respuesta externa
+      // que una cuenta inexistente. Detalle solo en log.
+      console.warn(
+        '[RESET_PASSWORD] Verificación OTP de email fallida (respuesta genérica al cliente):',
+        otpError instanceof Error ? otpError.message : otpError
+      );
+      throw new CustomerAuthError('RESET_FAILED', GENERIC_RESET_FAILURE);
+    }
+
+    await db.user.update({
+      where: { id: user.id },
+      data: {
+        password: await hashPassword(newPassword),
+        passwordChangedAt: new Date(),
+        emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+      },
+    });
+  } else {
+    if (!user.phone) {
+      throw new CustomerAuthError('RESET_FAILED', GENERIC_RESET_FAILURE);
+    }
+
+    try {
+      await verifyPhoneOtp(user.phone, otpCode);
+    } catch (otpError) {
+      console.warn(
+        '[RESET_PASSWORD] Verificación OTP de teléfono fallida (respuesta genérica al cliente):',
+        otpError instanceof Error ? otpError.message : otpError
+      );
+      throw new CustomerAuthError('RESET_FAILED', GENERIC_RESET_FAILURE);
+    }
+
+    await db.user.update({
+      where: { id: user.id },
+      data: {
+        password: await hashPassword(newPassword),
+        passwordChangedAt: new Date(),
+      },
+    });
+  }
 
   await db.session.deleteMany({ where: { userId: user.id } });
 }

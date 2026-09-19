@@ -55,6 +55,18 @@ vi.mock('@/lib/auth-dual', async () => {
   };
 });
 
+vi.mock('@/lib/email-otp', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/email-otp')>('@/lib/email-otp');
+  return {
+    ...actual,
+    issueEmailOtp: vi.fn().mockResolvedValue({ sent: true }),
+    verifyEmailOtp: vi.fn().mockImplementation(async (_email: string, _p: string, code: string) => {
+      if (code !== '123456') throw new Error('Código inválido o expirado');
+    }),
+    isEmailOtpConfigured: vi.fn().mockReturnValue(true),
+  };
+});
+
 import {
   registerCustomer,
   changePassword,
@@ -296,16 +308,18 @@ describe('Auth: login por OTP (sin duplicados)', () => {
     expect(mockDb.session.create).toHaveBeenCalled();
   });
 
-  it('OTP para un teléfono NUEVO sí crea cuenta (alta por OTP) con rol CUSTOMER explícito', async () => {
+  it('OTP para un teléfono NUEVO NO crea cuenta (LOGIN = solo cuentas existentes)', async () => {
     mockDb.user.findFirst.mockResolvedValue(null);
 
     const { loginWithPhone } = await import('@/lib/auth-dual');
-    const result = await loginWithPhone('3105551234', '1234');
-
-    expect(result.user.phone).toBe('573105551234');
-    expect(mockDb.user.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ phone: '573105551234', role: 'CUSTOMER' }),
-    });
+    // El OTP es válido (mock 1234), pero el teléfono no tiene cuenta: la
+    // respuesta es genérica y NO se registra nada (registro explícito en
+    // /registrarse).
+    await expect(loginWithPhone('3105551234', '1234')).rejects.toThrow(
+      'Código inválido o expirado'
+    );
+    expect(mockDb.user.create).not.toHaveBeenCalled();
+    expect(mockDb.session.create).not.toHaveBeenCalled();
   });
 
   it('la respuesta de login OTP es el DTO público (sin password)', async () => {
@@ -399,17 +413,19 @@ describe('Auth: restablecimiento por OTP (anti-enumeración)', () => {
     expect(verifyPhoneOtp).toHaveBeenCalledWith('573001234567', '9999');
   });
 
-  it('cuenta inexistente => error genérico y NUNCA verifica el email como teléfono', async () => {
+  it('cuenta inexistente => error genérico y NUNCA verifica el identificador contra proveedores', async () => {
     mockDb.user.findFirst.mockResolvedValue(null);
 
     await expect(
       resetPasswordWithOtp('nadie@test.com', '1234', TEST_NEW_PASSWORD)
     ).rejects.toThrow(CustomerAuthError);
 
-    // El identificador crudo (email) NO llegó al proveedor: hacerlo produciría
-    // un error de formato que filtra la existencia de la cuenta.
+    // El identificador crudo (email) NO llegó a ningún proveedor: hacerlo
+    // produciría un error de formato que filtra la existencia de la cuenta.
     const { verifyPhoneOtp } = await import('@/lib/auth-dual');
+    const { verifyEmailOtp } = await import('@/lib/email-otp');
     expect(verifyPhoneOtp).not.toHaveBeenCalled();
+    expect(verifyEmailOtp).not.toHaveBeenCalled();
     expect(mockDb.user.create).not.toHaveBeenCalled();
     expect(mockDb.user.update).not.toHaveBeenCalled();
   });
@@ -472,5 +488,91 @@ describe('Auth: restablecimiento por OTP (anti-enumeración)', () => {
     const result = await requestPasswordReset('3001234567');
     expect(result.otpSent).toBe(false);
     expect(result.otpNotConfigured).toBe(true);
+  });
+});
+
+describe('Auth: restablecimiento por EMAIL (canal preferido)', () => {
+  it('solicitud con email => emite OTP de email (no SMS) para la cuenta que lo tenga', async () => {
+    mockDb.user.findUnique.mockResolvedValue({
+      id: 'u1',
+      email: 'a@test.com',
+      phone: '573001234567',
+      emailVerifiedAt: null,
+      isActive: true,
+    });
+
+    const result = await requestPasswordReset('a@test.com');
+    expect(result.otpSent).toBe(true);
+    const { issueEmailOtp } = await import('@/lib/email-otp');
+    const { sendPhoneOtp } = await import('@/lib/auth-dual');
+    expect(issueEmailOtp).toHaveBeenCalledWith('a@test.com', 'password_reset');
+    expect(sendPhoneOtp).not.toHaveBeenCalled();
+  });
+
+  it('reset por email exitoso => cambia contraseña, VERIFICA el correo y cierra TODAS las sesiones', async () => {
+    mockDb.user.findUnique.mockResolvedValue({
+      id: 'u1',
+      email: 'a@test.com',
+      phone: '573001234567',
+      emailVerifiedAt: null,
+      isActive: true,
+    });
+
+    await resetPasswordWithOtp('a@test.com', '123456', TEST_NEW_PASSWORD);
+
+    expect(mockDb.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'u1' },
+        data: expect.objectContaining({
+          passwordChangedAt: expect.any(Date),
+          emailVerifiedAt: expect.any(Date),
+        }),
+      })
+    );
+    expect(mockDb.session.deleteMany).toHaveBeenCalledWith({ where: { userId: 'u1' } });
+  });
+
+  it('OTP de email incorrecto => error GENÉRICO sin cambiar nada', async () => {
+    mockDb.user.findUnique.mockResolvedValue({
+      id: 'u1',
+      email: 'a@test.com',
+      phone: null,
+      emailVerifiedAt: new Date(),
+      isActive: true,
+    });
+
+    await expect(
+      resetPasswordWithOtp('a@test.com', '000000', TEST_NEW_PASSWORD)
+    ).rejects.toThrow(/No fue posible restablecer/);
+
+    expect(mockDb.user.update).not.toHaveBeenCalled();
+    expect(mockDb.session.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('cuenta sin email usable para el canal => genérico sin llamar al proveedor', async () => {
+    // Identificador email que no existe => sin cuenta => genérico
+    mockDb.user.findUnique.mockResolvedValue(null);
+    await expect(
+      resetPasswordWithOtp('fantasma@test.com', '123456', TEST_NEW_PASSWORD)
+    ).rejects.toThrow(/No fue posible restablecer/);
+    const { verifyEmailOtp } = await import('@/lib/email-otp');
+    expect(verifyEmailOtp).not.toHaveBeenCalled();
+  });
+
+  it('usuarios de backoffice también pueden recuperar por email (maestro User)', async () => {
+    mockDb.user.findUnique.mockResolvedValue({
+      id: 'admin-1',
+      email: 'admin@compusum.co',
+      phone: null,
+      emailVerifiedAt: new Date('2026-01-01'),
+      isActive: true,
+    });
+
+    await resetPasswordWithOtp('admin@compusum.co', '123456', TEST_NEW_PASSWORD);
+
+    expect(mockDb.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'admin-1' } })
+    );
+    expect(mockDb.session.deleteMany).toHaveBeenCalledWith({ where: { userId: 'admin-1' } });
   });
 });

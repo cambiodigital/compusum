@@ -35,6 +35,11 @@ model User {
   // Marca de tiempo del último cambio/reset de contraseña (auditoría)
   passwordChangedAt DateTime?
 
+  // Verificación de posesión del correo: se marca al autenticar con éxito
+  // mediante OTP enviado a ese email (o al restablecer contraseña vía email).
+  // null = correo aún no verificado; no bloquea ningún flujo existente.
+  emailVerifiedAt DateTime?
+
   assignedAgentId String?
   assignedAgent   User?   @relation("AgentCustomers", fields: [assignedAgentId], references: [id])
   customers       User[]  @relation("AgentCustomers")
@@ -485,6 +490,33 @@ model Setting {
   label     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// =====================
+// DESAFÍOS OTP SELF-MANAGED (EMAIL)
+// =====================
+// Códigos de un solo uso generados por la aplicación (hoy solo canal EMAIL;
+// el OTP por teléfono sigue gestionado por Twilio Verify y NO usa esta tabla).
+// Invariante de seguridad: el código NUNCA se persiste en texto plano, solo su
+// HMAC-SHA256 con secreto server-side (OTP_HMAC_SECRET), de modo que un dump
+// de la tabla no permite fuerza bruta offline sobre el espacio de 10^6 códigos.
+// Unicidad (purpose, identityType, identity): un desafío ACTIVO por identidad
+// y propósito; reemitir lo reemplaza (y reinicia intentos/expiración).
+model AuthChallenge {
+  id           String    @id @default(cuid())
+  purpose      String // login | password_reset
+  identityType String // email | phone
+  identity     String // email normalizado o teléfono canónico (57...)
+  codeHash     String // HMAC-SHA256 hex del código
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(5)
+  expiresAt    DateTime
+  consumedAt   DateTime? // single-use: se fija al verificar con éxito
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([purpose, identityType, identity])
+  @@index([expiresAt])
 }
 
 // =====================

@@ -18,6 +18,25 @@ export const FORGOT_ID_MAX_ATTEMPTS = 5;
 export const FORGOT_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
 export const FORGOT_LOCKOUT_MS = 30 * 60 * 1000; // 30 minutos de bloqueo
 
+// ============================================================================
+// POLÍTICA OTP UNIFICADA (envío y verificación de códigos temporales).
+//   - Envío por IP: 10 solicitudes / 15 min; bloqueo 30 min.
+//   - Envío por identidad (email normalizado o teléfono canónico): 5 / 15 min;
+//     bloqueo 30 min. El cooldown fino (60 s por identidad) lo aplica además
+//     el desafío OTP de email (updatedAt/createdAt del challenge).
+//   - Verificación por IP: 10 intentos / 15 min; bloqueo 15 min. Por identidad
+//     el límite fino lo impone el propio desafío (5 intentos) o el proveedor
+//     (Twilio Verify).
+// ============================================================================
+export const OTP_SEND_IP_MAX_ATTEMPTS = 10;
+export const OTP_SEND_ID_MAX_ATTEMPTS = 5;
+export const OTP_SEND_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
+export const OTP_SEND_LOCKOUT_MS = 30 * 60 * 1000; // 30 minutos de bloqueo
+export const OTP_VERIFY_IP_MAX_ATTEMPTS = 10;
+export const OTP_VERIFY_ID_MAX_ATTEMPTS = 10;
+export const OTP_VERIFY_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
+export const OTP_VERIFY_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutos de bloqueo
+
 export interface RateLimitCheckResult {
   isBlocked: boolean;
   remainingAttempts: number;

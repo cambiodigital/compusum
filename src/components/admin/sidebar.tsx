@@ -68,7 +68,7 @@ export function Sidebar({ user }: SidebarProps) {
   const handleLogout = async () => {
     try {
       await fetch("/api/auth/logout", { method: "POST" });
-      window.location.href = "/admin/login";
+      window.location.href = "/ingresar?next=%2Fadmin";
     } catch (error) {
       console.error("Error al cerrar sesión:", error);
     }

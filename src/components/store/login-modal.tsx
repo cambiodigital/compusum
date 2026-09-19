@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AlertCircle, Loader2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { PHONE_OTP_LENGTH } from "@/lib/phone-otp";
+import { PHONE_OTP_MAX_LENGTH, PHONE_OTP_MIN_LENGTH } from "@/lib/phone-otp";
 
 const OTP_PROGRESS_STORAGE_KEY = "compusum-login-otp-progress";
 const OTP_PROGRESS_TTL_MS = 15 * 60 * 1000;
@@ -228,10 +228,11 @@ export function LoginModal({ open, onOpenChange, onLoginSuccess }: LoginModalPro
               </p>
               <Input
                 type="text"
-                placeholder="1234"
+                inputMode="numeric"
+                placeholder="123456"
                 value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, PHONE_OTP_LENGTH))}
-                maxLength={PHONE_OTP_LENGTH}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, PHONE_OTP_MAX_LENGTH))}
+                maxLength={PHONE_OTP_MAX_LENGTH}
                 className="text-center text-2xl tracking-widest"
               />
             </div>
@@ -260,7 +261,10 @@ export function LoginModal({ open, onOpenChange, onLoginSuccess }: LoginModalPro
               >
                 Volver
               </Button>
-              <Button type="submit" className="flex-1" disabled={otp.length !== PHONE_OTP_LENGTH || loading}>
+              {/* TRANSICIÓN 4→6: Twilio Verify aún puede generar códigos de 4
+                  dígitos; el botón habilita desde 4 hasta que el servicio
+                  quede en CodeLength=6. */}
+              <Button type="submit" className="flex-1" disabled={otp.length < PHONE_OTP_MIN_LENGTH || loading}>
                 {loading ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
