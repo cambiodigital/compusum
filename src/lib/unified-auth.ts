@@ -282,8 +282,12 @@ export async function sendOtpForLogin(
   }
 
   if (!user.phone) return null;
-  await sendPhoneOtp(user.phone); // Twilio Verify o mock de desarrollo
-  return { channel: 'sms' };
+  const sent = await sendPhoneOtp(user.phone); // Twilio Verify o mock de desarrollo
+  // El mock de desarrollo devuelve el código para poder probar sin Twilio; la
+  // doble guardia (env del mock + NODE_ENV) impide que salga en producción.
+  const debugCode =
+    sent.debugCode && process.env.NODE_ENV !== 'production' ? sent.debugCode : undefined;
+  return { channel: 'sms', ...(debugCode ? { debugCode } : {}) };
 }
 
 /**

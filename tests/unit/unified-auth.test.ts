@@ -68,7 +68,7 @@ vi.mock('@/lib/auth-dual', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-dual')>('@/lib/auth-dual');
   return {
     ...actual,
-    sendPhoneOtp: vi.fn().mockResolvedValue({ provider: 'mock' }),
+    sendPhoneOtp: vi.fn().mockResolvedValue({ provider: 'mock', debugCode: '123456' }),
     verifyPhoneOtp: vi.fn().mockImplementation(async (_phone: string, code: string) => {
       if (code !== '654321') throw new Error('Código inválido o expirado');
     }),
@@ -518,6 +518,8 @@ describe('OTP de login: canal SMS (fallback)', () => {
     expect(sent?.channel).toBe('sms');
     expect(sendPhoneOtp).toHaveBeenCalledWith('573001234567');
     expect(sendEmail).not.toHaveBeenCalled();
+    // El mock de desarrollo propaga su código (nunca en producción)
+    expect(sent?.debugCode).toBe('123456');
 
     const result = await verifyOtpForLogin('3001234567', '654321');
     expect(result.token).toBeDefined();

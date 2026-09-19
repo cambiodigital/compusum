@@ -88,7 +88,7 @@ vi.mock('@/lib/auth-dual', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-dual')>('@/lib/auth-dual');
   return {
     ...actual,
-    sendPhoneOtp: vi.fn().mockResolvedValue({ provider: 'mock' }),
+    sendPhoneOtp: vi.fn().mockResolvedValue({ provider: 'mock', debugCode: '123456' }),
     verifyPhoneOtp: vi.fn().mockImplementation(async (_phone: string, code: string) => {
       if (code !== '654321') throw new Error('Código inválido o expirado');
     }),
@@ -527,6 +527,21 @@ describe('ENDPOINT /api/auth/otp/verify', () => {
 
     expect(okRaw).not.toContain(code);
     expect(badRaw).not.toContain('999999');
+  });
+
+  it('OTP SMS en desarrollo => expone el debugCode del mock (nunca en producción)', async () => {
+    await seedUser({ phone: '573001234567' });
+    const res = await otpSendPOST(jsonReq('/api/auth/otp/send', { identifier: '3001234567' }));
+    const json = await res.json();
+    expect(json.data.channel).toBe('sms');
+    expect(json.data.debugCode).toBe('123456');
+
+    vi.stubEnv('NODE_ENV', 'production');
+    await seedUser({ phone: '573009999999' });
+    const prodRaw = JSON.stringify(
+      await (await otpSendPOST(jsonReq('/api/auth/otp/send', { identifier: '3009999999' }))).json()
+    );
+    expect(prodRaw).not.toContain('debugCode');
   });
 
   it('OTP SMS de CUSTOMER => sesión y redirectTo /mi-cuenta', async () => {
